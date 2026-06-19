@@ -38,16 +38,18 @@ type Tray struct {
 	auth          auth.Client
 	q             *queue.Queue
 	coreURL       string
+	version       string
 	stateCh       chan State
 	errorMsg      string
 	uploadingGame string
 }
 
-func New(a auth.Client, q *queue.Queue, coreURL string) *Tray {
+func New(a auth.Client, q *queue.Queue, coreURL, version string) *Tray {
 	return &Tray{
 		auth:    a,
 		q:       q,
 		coreURL: coreURL,
+		version: version,
 		// Buffer so SetState never blocks a caller.
 		stateCh: make(chan State, 8),
 	}
@@ -103,6 +105,9 @@ type menuItems struct {
 	openDashNG *systray.MenuItem
 	signOutNG  *systray.MenuItem
 	quitNG     *systray.MenuItem
+
+	// Always visible — not included in hideAll.
+	versionItem *systray.MenuItem
 }
 
 func buildMenu() *menuItems {
@@ -129,15 +134,19 @@ func buildMenu() *menuItems {
 	m.signOutNG = systray.AddMenuItem("Sign Out", "")
 	m.quitNG = systray.AddMenuItem("Quit", "")
 
+	m.versionItem = systray.AddMenuItem("", "")
+	m.versionItem.Disable()
+
 	return m
 }
 
 func (t *Tray) onReady() {
 	systray.SetTitle("LudoTrace")
-	systray.SetTooltip("LudoTrace")
+	systray.SetTooltip(fmt.Sprintf("LudoTrace %s", t.version))
 	systray.SetIcon(iconIdle)
 
 	m := buildMenu()
+	m.versionItem.SetTitle(fmt.Sprintf("v%s", t.version))
 
 	// Render initial state before any SetState call arrives.
 	t.applyState(StateIdle, m)
