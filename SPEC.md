@@ -152,7 +152,7 @@ lt-client tracks its read position per game using a sidecar offset file stored i
 <config_dir>/ludotrace/offsets/<game_id>.offset
 ```
 
-The file contains a single integer: the byte offset after the last `session_end` line successfully uploaded to Core. On `202`, the offset advances and the sidecar is written atomically (write to `.tmp`, rename).
+The file contains a single integer: the byte offset of the end of the last session successfully uploaded to Core. On `202`, the offset advances and the sidecar is written atomically (write to `.tmp`, rename).
 
 **Session extraction** (run after each debounced WRITE and on startup):
 
@@ -160,7 +160,9 @@ The file contains a single integer: the byte offset after the last `session_end`
 offset := loadOffset(game.GameID)   // 0 if sidecar missing — full reprocess
 lines, newOffset := readLinesFrom(eventsPath, offset)
 
-// Scan for complete session_start → session_end pairs
+// Split into play sessions. Boundaries are session_start markers and the
+// inactivity timeout only — session_end is opaque payload, not a boundary
+// (see "Session boundaries" below).
 sessions := extractSessions(lines, game.GameID)
 
 for _, s := range sessions {
@@ -173,7 +175,9 @@ for _, s := range sessions {
 }
 ```
 
-**Orphan sessions.** A `session_start` with no following `session_end` and whose last event timestamp is >30 minutes old is treated as complete and uploaded as-is. A session still within the 30-minute window is left for the next read cycle.
+**Session boundaries.** A play session runs from one `session_start` to the next. When a new `session_start` is seen, the previous session is closed and flushed (the game was reloaded). `session_end` is **not** a boundary — it is buffered into the open session like any other event. This is deliberate: `session_end` is emitted on game-specific cadences (Fallout 4 writes one per *save*, so a single play session contains many), and treating it as a terminator would split or drop everything played after the first save. The Client stays game-agnostic by recognising only `session_start` and inactivity as structural signals.
+
+**Orphan / inactivity flush.** An open session whose events file has gone >30 minutes without a write is treated as finished and uploaded as-is. This closes the final session of a play period, including one that ended with no clean `session_end` (crash, or quit with no final save). A session still within the 30-minute window is left for the next read cycle.
 
 **Offset advancement.** The uploader writes the sidecar offset after receiving `202` — not before, not on enqueue. If the Client crashes between `202` and the sidecar write, the session is reprocessed on next startup (Core receives a duplicate; acceptable at MVP — deduplicate by `session_start` timestamp in a future iteration).
 
@@ -347,7 +351,7 @@ client/
 │   ├── auth/                — Clerk OAuth flow, token refresh, ErrNotAuthenticated
 │   ├── keychain/            — token storage (zalando/go-keyring)
 │   ├── watcher/             — fsnotify wrapper, WRITE-event watch, debounce, startup trigger
-│   ├── session/             — session extraction (session_start→session_end), orphan detection, sidecar offset read/write, temp file writer
+│   ├── session/             — session extraction (split on session_start / inactivity), orphan detection, sidecar offset read/write, temp file writer
 │   ├── queue/               — durable upload queue (queue.json), Contains(), enqueue, dequeue
 │   ├── uploader/            — gzip + multipart POST to Core, response handling, backoff, offset advancement on 202
 │   └── tray/                — systray icon + menu, state derivation, Add Game dialog

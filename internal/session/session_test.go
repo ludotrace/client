@@ -30,6 +30,17 @@ func writeEvents(t *testing.T, path string, lines []string) {
 	}
 }
 
+// makeOld backdates the events file past the inactivity threshold so an open
+// session is flushed as finished. session_end no longer triggers a flush on its
+// own, so a test that wants a terminal session enqueued must mark the file idle.
+func makeOld(t *testing.T, path string) {
+	t.Helper()
+	past := time.Now().Add(-(orphanThreshold + time.Minute))
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+}
+
 func TestExtract_OneCompleteSession(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
@@ -42,6 +53,7 @@ func TestExtract_OneCompleteSession(t *testing.T) {
 		`{"type":"session_end","session_id":"s1"}`,
 	}
 	writeEvents(t, eventsPath, lines)
+	makeOld(t, eventsPath) // session flushes on inactivity, not on session_end
 
 	e := New("fallout4", eventsPath, offsetPath, dir, q)
 	if err := e.Extract(); err != nil {
@@ -87,6 +99,8 @@ func TestExtract_TwoConsecutiveSessions(t *testing.T) {
 		`{"type":"session_end","session_id":"s2"}`,
 	}
 	writeEvents(t, eventsPath, lines)
+	// s1 flushes when s2's session_start is seen; s2 flushes on inactivity.
+	makeOld(t, eventsPath)
 
 	e := New("fallout4", eventsPath, offsetPath, dir, q)
 	if err := e.Extract(); err != nil {
@@ -95,6 +109,95 @@ func TestExtract_TwoConsecutiveSessions(t *testing.T) {
 
 	if q.Len() != 2 {
 		t.Fatalf("expected 2 queued items, got %d", q.Len())
+	}
+}
+
+// TestExtract_SessionEndIsNotABoundary covers the core fix: events that arrive
+// after a session_end belong to the same play session and must not be lost.
+// Fallout 4 writes a session_end on every save, so play continuing after a save
+// is the common case, not an edge case.
+func TestExtract_SessionEndContinuesSession(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	offsetPath := filepath.Join(dir, "offset")
+	q := newTestQueue(t)
+
+	lines := []string{
+		`{"type":"session_start","session_id":"s1"}`,
+		`{"type":"kill","target":"radroach"}`,
+		`{"type":"session_end","session_id":"s1"}`, // a save mid-session
+		`{"type":"kill","target":"deathclaw"}`,     // played on after the save
+		`{"type":"session_end","session_id":"s1"}`, // another save
+		`{"type":"kill","target":"mirelurk"}`,      // and quit/crashed with no final save
+	}
+	writeEvents(t, eventsPath, lines)
+
+	e := New("fallout4", eventsPath, offsetPath, dir, q)
+
+	// Recent file: the session is still open and nothing is enqueued, even
+	// though two session_end lines have been seen.
+	if err := e.Extract(); err != nil {
+		t.Fatalf("Extract (recent): %v", err)
+	}
+	if q.Len() != 0 {
+		t.Fatalf("recent file with session_end should not enqueue, got %d", q.Len())
+	}
+
+	// Once the file goes idle the whole session flushes as one bundle —
+	// including every event after each session_end.
+	makeOld(t, eventsPath)
+	if err := e.Extract(); err != nil {
+		t.Fatalf("Extract (idle): %v", err)
+	}
+	if q.Len() != 1 {
+		t.Fatalf("expected 1 queued item, got %d", q.Len())
+	}
+	item, _ := q.Peek()
+	data, err := os.ReadFile(item.TmpPath)
+	if err != nil {
+		t.Fatalf("read temp file: %v", err)
+	}
+	for _, want := range []string{"radroach", "deathclaw", "mirelurk"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("bundle missing %q (post-session_end data lost): %s", want, data)
+		}
+	}
+}
+
+// TestExtract_NewSessionFlushesUnclosedPrior covers the second data-loss path:
+// a session_start with no preceding session_end (e.g. a reload after a save-less
+// crash) must flush the prior session rather than discard it.
+func TestExtract_NewSessionFlushesUnclosedPrior(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	offsetPath := filepath.Join(dir, "offset")
+	q := newTestQueue(t)
+
+	lines := []string{
+		`{"type":"session_start","session_id":"s1"}`,
+		`{"type":"kill","target":"raider"}`,
+		// no session_end for s1 — game crashed, then was relaunched:
+		`{"type":"session_start","session_id":"s2"}`,
+		`{"type":"kill","target":"ghoul"}`,
+		`{"type":"session_end","session_id":"s2"}`,
+	}
+	writeEvents(t, eventsPath, lines)
+	makeOld(t, eventsPath) // flush the still-open s2 as well
+
+	e := New("fallout4", eventsPath, offsetPath, dir, q)
+	if err := e.Extract(); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if q.Len() != 2 {
+		t.Fatalf("expected 2 queued items (s1 flushed by s2 start, s2 by inactivity), got %d", q.Len())
+	}
+	first, _ := q.Peek()
+	data, err := os.ReadFile(first.TmpPath)
+	if err != nil {
+		t.Fatalf("read temp file: %v", err)
+	}
+	if !strings.Contains(string(data), "raider") || strings.Contains(string(data), "ghoul") {
+		t.Errorf("first bundle should be s1 only (the unclosed prior), got: %s", data)
 	}
 }
 
@@ -180,6 +283,7 @@ func TestExtract_ReadsFromPersistedOffset(t *testing.T) {
 	if err := writeOffsetFile(offsetPath, offsetPastS1); err != nil {
 		t.Fatalf("writeOffsetFile: %v", err)
 	}
+	makeOld(t, eventsPath) // flush s2 on inactivity
 
 	e := New("fallout4", eventsPath, offsetPath, dir, q)
 	if err := e.Extract(); err != nil {

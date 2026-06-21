@@ -15,7 +15,7 @@ import (
 	"github.com/ludotrace/client/internal/queue"
 )
 
-const orphanThreshold = 30 * time.Minute
+const orphanThreshold = 10 * time.Minute
 
 type Extractor struct {
 	gameID     string
@@ -79,9 +79,13 @@ type eventEnvelope struct {
 }
 
 type openSession struct {
-	lines     [][]byte
-	startOff  int64 // byte offset of the session_start line
-	lastLineAt time.Time
+	lines [][]byte
+}
+
+func (s *openSession) append(rawJSON []byte) {
+	lineCopy := make([]byte, len(rawJSON))
+	copy(lineCopy, rawJSON)
+	s.lines = append(s.lines, lineCopy)
 }
 
 func (e *Extractor) Extract() error {
@@ -132,39 +136,28 @@ func (e *Extractor) Extract() error {
 			continue
 		}
 
-		now := time.Now()
-		switch env.Type {
-		case "session_start":
-			// Drop any previously open session that has no end — it's still live
-			// (the game re-started a new session without ending the prior one cleanly).
-			current = &openSession{
-				startOff:   curOffset,
-				lastLineAt: now,
-			}
-			lineCopy := make([]byte, len(rawJSON))
-			copy(lineCopy, rawJSON)
-			current.lines = append(current.lines, lineCopy)
-
-		case "session_end":
+		// The Client recognises exactly one structural boundary marker —
+		// session_start — plus the inactivity timeout below. Everything else,
+		// including session_end, is opaque payload buffered into the open
+		// session. This keeps the boundary logic game-agnostic: games emit
+		// session_end on different cadences (Fallout 4, for example, writes one
+		// per save, so a single play session contains many), and the Client
+		// must not treat any of them as a terminator or it would split or drop
+		// data based on a game-specific quirk. A play session therefore runs
+		// from one session_start to the next, or to a gap in activity.
+		if env.Type == "session_start" {
+			// A new session beginning means any session still open has ended —
+			// the game was reloaded. Flush it (rather than discard it) up to the
+			// byte where this session_start begins, then open the new one.
 			if current != nil {
-				current.lastLineAt = now
-				lineCopy := make([]byte, len(rawJSON))
-				copy(lineCopy, rawJSON)
-				current.lines = append(current.lines, lineCopy)
-				endOffset := curOffset + lineLen
-				if err := e.writeAndEnqueue(current, endOffset); err != nil {
+				if err := e.writeAndEnqueue(current, curOffset); err != nil {
 					return err
 				}
-				current = nil
 			}
-
-		default:
-			if current != nil {
-				current.lastLineAt = now
-				lineCopy := make([]byte, len(rawJSON))
-				copy(lineCopy, rawJSON)
-				current.lines = append(current.lines, lineCopy)
-			}
+			current = &openSession{}
+			current.append(rawJSON)
+		} else if current != nil {
+			current.append(rawJSON)
 		}
 
 		curOffset += lineLen
@@ -174,10 +167,13 @@ func (e *Extractor) Extract() error {
 		return fmt.Errorf("session: scan: %w", err)
 	}
 
-	// Orphan detection: open session + events file hasn't been modified in >30min.
+	// Inactivity boundary: an open session whose events file hasn't been
+	// modified in >orphanThreshold is treated as finished and flushed. This is
+	// the generic "the player stopped" signal — it is what closes the final
+	// session of a play period, including one that ended without a clean
+	// session_end (e.g. a crash or a quit with no final save).
 	if current != nil && time.Since(modTime) > orphanThreshold {
-		endOffset := curOffset
-		if err := e.writeAndEnqueue(current, endOffset); err != nil {
+		if err := e.writeAndEnqueue(current, curOffset); err != nil {
 			return err
 		}
 	}
