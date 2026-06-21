@@ -83,7 +83,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	t := tray.New(authClient, q, cfg.CoreURL, version)
+	t := tray.New(authClient, q, cfg.CoreURL, cfg.AppURL, version)
+	t.SetHasGames(len(cfg.Games) > 0)
 
 	if !authClient.IsSignedIn() {
 		t.SetState(tray.StateNotAuth)
@@ -120,7 +121,7 @@ func main() {
 		t.Quit()
 	}()
 
-	slog.Info("ludotrace client started", "core_url", cfg.CoreURL, "games", len(cfg.Games))
+	slog.Info("ludotrace client started", "core_url", cfg.CoreURL, "app_url", cfg.AppURL, "games", len(cfg.Games))
 	t.Run() // blocks main goroutine until Quit() or systray exit
 	stop()
 }

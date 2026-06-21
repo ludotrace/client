@@ -27,7 +27,7 @@ func TestLoad_ValidTOML(t *testing.T) {
 	}
 
 	withConfigFile(t, `
-core_url = "https://core.ludotrace.gg"
+core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id     = "fallout4"
@@ -39,7 +39,7 @@ events_file = "lt_fo4_events.jsonl"
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.CoreURL != "https://core.ludotrace.gg" {
+	if cfg.CoreURL != "https://core.ludotrace.com" {
 		t.Errorf("CoreURL = %q", cfg.CoreURL)
 	}
 	if len(cfg.Games) != 1 {
@@ -61,7 +61,7 @@ func TestLoad_MissingFile_ReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.CoreURL != "https://core.ludotrace.gg" {
+	if cfg.CoreURL != "https://core.ludotrace.com" {
 		t.Errorf("default CoreURL = %q", cfg.CoreURL)
 	}
 	if len(cfg.Games) != 0 {
@@ -70,7 +70,7 @@ func TestLoad_MissingFile_ReturnsDefaults(t *testing.T) {
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
-	withConfigFile(t, `core_url = "https://core.ludotrace.gg"`)
+	withConfigFile(t, `core_url = "https://core.ludotrace.com"`)
 	t.Setenv("LUDOTRACE_CORE_URL", "http://localhost:8080")
 
 	cfg, err := Load()
@@ -84,7 +84,7 @@ func TestLoad_EnvOverride(t *testing.T) {
 
 func TestLoad_MissingWatchPath_SkipsGame(t *testing.T) {
 	withConfigFile(t, `
-core_url = "https://core.ludotrace.gg"
+core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id     = "fallout4"
@@ -118,7 +118,7 @@ func TestLoad_MissingGameID_SkipsGame(t *testing.T) {
 	}
 
 	withConfigFile(t, `
-core_url = "https://core.ludotrace.gg"
+core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id     = ""

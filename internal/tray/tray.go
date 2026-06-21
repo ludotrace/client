@@ -38,17 +38,26 @@ type Tray struct {
 	auth          auth.Client
 	q             *queue.Queue
 	coreURL       string
+	appURL        string
 	version       string
+	hasGames      bool
 	stateCh       chan State
 	errorMsg      string
 	uploadingGame string
 }
 
-func New(a auth.Client, q *queue.Queue, coreURL, version string) *Tray {
+// SetHasGames records whether any games are configured, so the sign-in handler
+// can pick the right post-auth state (Idle vs NoGames).
+func (t *Tray) SetHasGames(v bool) {
+	t.hasGames = v
+}
+
+func New(a auth.Client, q *queue.Queue, coreURL, appURL, version string) *Tray {
 	return &Tray{
 		auth:    a,
 		q:       q,
 		coreURL: coreURL,
+		appURL:  appURL,
 		version: version,
 		// Buffer so SetState never blocks a caller.
 		stateCh: make(chan State, 8),
@@ -88,17 +97,17 @@ func (t *Tray) SetUploading(gameName string) {
 // Separators are not included because AddSeparator returns void and cannot be toggled.
 type menuItems struct {
 	// Authenticated states (Idle / Uploading / Error / LimitReached / NoGames)
-	statusLine   *systray.MenuItem
-	addGame      *systray.MenuItem
-	manageGames  *systray.MenuItem
-	openDash     *systray.MenuItem
-	retry        *systray.MenuItem
-	signOut      *systray.MenuItem
-	quit         *systray.MenuItem
+	statusLine  *systray.MenuItem
+	addGame     *systray.MenuItem
+	manageGames *systray.MenuItem
+	openDash    *systray.MenuItem
+	retry       *systray.MenuItem
+	signOut     *systray.MenuItem
+	quit        *systray.MenuItem
 
 	// StateNotAuth
-	signIn  *systray.MenuItem
-	quitNA  *systray.MenuItem
+	signIn *systray.MenuItem
+	quitNA *systray.MenuItem
 
 	// StateNoGames overrides
 	addGameNG  *systray.MenuItem
@@ -146,7 +155,7 @@ func (t *Tray) onReady() {
 	systray.SetIcon(iconIdle)
 
 	m := buildMenu()
-	m.versionItem.SetTitle(fmt.Sprintf("v%s", t.version))
+	m.versionItem.SetTitle(fmt.Sprintf("version %s", t.version))
 
 	// Render initial state before any SetState call arrives.
 	t.applyState(StateIdle, m)
@@ -237,6 +246,12 @@ func (t *Tray) clickLoop(m *menuItems) {
 			go func() {
 				if err := t.auth.SignIn(context.Background()); err != nil {
 					t.SetError(err.Error())
+					return
+				}
+				if t.hasGames {
+					t.SetState(StateIdle)
+				} else {
+					t.SetState(StateNoGames)
 				}
 			}()
 
@@ -272,14 +287,14 @@ func (t *Tray) clickLoop(m *menuItems) {
 
 		case <-m.openDash.ClickedCh:
 			go func() {
-				if err := openBrowser(t.coreURL + "/dashboard"); err != nil {
+				if err := openBrowser(t.appURL); err != nil {
 					t.SetError(err.Error())
 				}
 			}()
 
 		case <-m.openDashNG.ClickedCh:
 			go func() {
-				if err := openBrowser(t.coreURL + "/dashboard"); err != nil {
+				if err := openBrowser(t.appURL); err != nil {
 					t.SetError(err.Error())
 				}
 			}()

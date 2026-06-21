@@ -67,7 +67,7 @@ client/
 Stored at OS config directory (`~/.config/ludotrace/config.toml` on Linux/macOS, `%APPDATA%\ludotrace\config.toml` on Windows):
 
 ```toml
-core_url = "https://core.ludotrace.gg"
+core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id    = "fallout4"
