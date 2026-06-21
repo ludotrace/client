@@ -14,7 +14,7 @@ Reference the overarching architecture at `ludotrace/internal/ARCHITECTURE.md` f
 
 - Run as a singleton background daemon (one instance per OS session)
 - Watch each game's append-only live events file for WRITE events (game-agnostic: any game with a config entry)
-- Extract complete sessions (`session_start`→`session_end`) and detect orphan sessions (30-min inactivity)
+- Extract play sessions, bounded by `session_start` markers and a 30-min inactivity timeout (see Watcher Logic)
 - Track read position per game via a sidecar offset file; advance offset only on 202 from Core
 - Authenticate with LudoTrace Core via browser-based OAuth (Clerk)
 - Store auth token securely in OS keychain
@@ -119,7 +119,7 @@ for each game in config.Games {
 
 on WRITE(eventsPath):
     debounce(2s, func() {
-        session.ExtractAndEnqueue(game) // reads from sidecar offset, finds session_start→session_end pairs
+        session.ExtractAndEnqueue(game) // reads from sidecar offset, splits into play sessions on session_start / inactivity
     })
 // Upload worker runs separately; tray state is derived from queue + auth state
 ```
@@ -127,8 +127,8 @@ on WRITE(eventsPath):
 Key behaviors:
 - **WRITE events, not CREATE** — the events file is long-lived and append-only; watch for modifications.
 - **Debounce** — coalesce burst WRITE events; wait for 2s quiet before extracting, to avoid reading partial lines.
-- **Session extraction** — reads new lines from sidecar offset, scans for `session_start`→`session_end` pairs. Each complete pair is written to a temp file and enqueued.
-- **Orphan sessions** — a `session_start` with no `session_end` and >30 min of event inactivity is uploaded as-is.
+- **Session extraction** — reads new lines from the sidecar offset and groups them into play sessions. The only structural boundary is `session_start`: a new one closes the previous session (the game was reloaded) and flushes it. `session_end` is **not** a boundary — it is opaque payload buffered into the current session. This is deliberate and game-agnostic: games emit `session_end` on different cadences (Fallout 4 writes one per *save*, so a single play session contains many), so treating it as a terminator would split or drop data based on a game-specific quirk. Each closed session is written to a temp file and enqueued.
+- **Inactivity flush (orphan)** — the open session is flushed when its events file has gone >30 min without a write. This is the generic "the player stopped" signal and is what closes the final session of a play period — including one that ended with no clean `session_end` at all (crash, or quit with no final save).
 - **Sidecar offset** — stored at `<config_dir>/offsets/<game_id>.offset`. Advanced only on 202. If missing, starts from byte 0 (full reprocess).
 - **Startup extraction** — on startup, immediately trigger extraction for each configured game.
 - **Missing events file** — watch the parent directory; promote to file watch on CREATE.
