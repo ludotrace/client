@@ -3,6 +3,7 @@ package tray
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -244,7 +245,21 @@ func (t *Tray) clickLoop(m *menuItems) {
 		select {
 		case <-m.signIn.ClickedCh:
 			go func() {
-				if err := t.auth.SignIn(context.Background()); err != nil {
+				err := t.auth.SignIn(context.Background())
+				switch {
+				case err == nil:
+					// Fully signed in and persisted.
+				case errors.Is(err, auth.ErrSignedInDegraded):
+					// Signed in and durable, but the OS keychain is broken.
+					// Stay signed in; just log — no need to alarm the user.
+					slog.Warn("sign-in succeeded via encrypted fallback; OS keychain unavailable", "err", err)
+				case errors.Is(err, auth.ErrSignedInNotPersisted):
+					// Signed in for this session only. Surface it so the user
+					// knows they'll have to sign in again after a restart.
+					t.SetError("Signed in, but couldn't save credentials — you may need to sign in again after restart (Windows Credential Manager may be full).")
+					return
+				default:
+					// Sign-in itself failed.
 					t.SetError(err.Error())
 					return
 				}

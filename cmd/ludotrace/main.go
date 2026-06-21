@@ -59,7 +59,12 @@ func main() {
 	lockFile.Close()
 	defer os.Remove(lockPath)
 
-	kc := keychain.New()
+	credPath, err := config.CredentialPath()
+	if err != nil {
+		slog.Error("failed to resolve credential path", "err", err)
+		os.Exit(1)
+	}
+	kc := keychain.New(credPath)
 	authClient := auth.New(auth.Config{CoreURL: cfg.CoreURL}, kc)
 
 	queuePath, err := config.QueuePath()

@@ -125,6 +125,18 @@ func LockPath() (string, error) {
 	return filepath.Join(d, "ludotrace.lock"), nil
 }
 
+// CredentialPath is the on-disk fallback location for the opaque token, used
+// only when the OS keychain is unavailable. On Windows the file content is
+// DPAPI-encrypted; on other platforms no secure fallback exists and the path
+// is unused.
+func CredentialPath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "credentials.bin"), nil
+}
+
 func OffsetPath(gameID string) (string, error) {
 	d, err := Dir()
 	if err != nil {
