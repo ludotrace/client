@@ -21,6 +21,8 @@ import (
 	"github.com/ludotrace/client/internal/watcher"
 )
 
+var version = "dev"
+
 func main() {
 	level := slog.LevelInfo
 	if strings.ToLower(os.Getenv("LUDOTRACE_LOG_LEVEL")) == "debug" {
@@ -81,7 +83,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	t := tray.New(authClient, q, cfg.CoreURL)
+	t := tray.New(authClient, q, cfg.CoreURL, version)
 
 	if !authClient.IsSignedIn() {
 		t.SetState(tray.StateNotAuth)

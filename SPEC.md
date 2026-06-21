@@ -29,7 +29,7 @@ TOML file in the OS config directory:
 - Windows: `%APPDATA%\ludotrace\config.toml`
 
 ```toml
-core_url = "https://core.ludotrace.gg"
+core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id     = "fallout4"
