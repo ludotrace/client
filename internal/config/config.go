@@ -12,6 +12,7 @@ import (
 
 type Config struct {
 	CoreURL string `toml:"core_url"`
+	AppURL  string `toml:"app_url"`
 	Games   []Game `toml:"games"`
 }
 
@@ -32,7 +33,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	cfg := &Config{CoreURL: "https://core.ludotrace.gg"}
+	cfg := &Config{
+		CoreURL: "https://core.ludotrace.com",
+		AppURL:  "https://app.ludotrace.com",
+	}
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return cfg, nil
@@ -45,9 +49,15 @@ func Load() (*Config, error) {
 	if v := os.Getenv("LUDOTRACE_CORE_URL"); v != "" {
 		cfg.CoreURL = v
 	}
+	if v := os.Getenv("LUDOTRACE_APP_URL"); v != "" {
+		cfg.AppURL = v
+	}
 
 	if err := validateURL(cfg.CoreURL); err != nil {
 		return nil, fmt.Errorf("config: core_url: %w", err)
+	}
+	if err := validateURL(cfg.AppURL); err != nil {
+		return nil, fmt.Errorf("config: app_url: %w", err)
 	}
 
 	cfg.Games = filterGames(cfg.Games)
@@ -113,6 +123,18 @@ func LockPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(d, "ludotrace.lock"), nil
+}
+
+// CredentialPath is the on-disk fallback location for the opaque token, used
+// only when the OS keychain is unavailable. On Windows the file content is
+// DPAPI-encrypted; on other platforms no secure fallback exists and the path
+// is unused.
+func CredentialPath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "credentials.bin"), nil
 }
 
 func OffsetPath(gameID string) (string, error) {

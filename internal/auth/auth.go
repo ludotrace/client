@@ -31,6 +31,17 @@ var (
 	// ErrTokenRevoked means Core rejected the stored opaque token.
 	// The token has been removed from the keychain; the user must sign in again.
 	ErrTokenRevoked = errors.New("auth: opaque token revoked or expired")
+
+	// ErrSignedInDegraded is returned by SignIn when sign-in succeeded and the
+	// session is fully usable, but the OS keychain was unavailable so the token
+	// was saved to the encrypted on-disk fallback. The token still survives a
+	// restart; callers may surface that the OS keychain needs attention.
+	ErrSignedInDegraded = errors.New("auth: signed in, but OS keychain unavailable — token saved to encrypted fallback file")
+
+	// ErrSignedInNotPersisted is returned by SignIn when sign-in succeeded and
+	// the session is usable, but the token could not be persisted anywhere. The
+	// user will have to sign in again after restarting the client.
+	ErrSignedInNotPersisted = errors.New("auth: signed in, but credentials could not be saved — you will need to sign in again after restarting")
 )
 
 const (
@@ -61,6 +72,13 @@ type Client interface {
 	// SignIn opens the system browser to Core's hosted sign-in page, starts a
 	// local HTTP listener for the redirect callback, and on success stores the
 	// opaque token returned by Core in the OS keychain.
+	//
+	// A nil return means fully signed in and persisted. SignIn may also return
+	// ErrSignedInDegraded (signed in; token saved to the encrypted fallback
+	// because the OS keychain was unavailable) or ErrSignedInNotPersisted
+	// (signed in for this session only; token could not be saved). Both indicate
+	// a usable session — callers should treat them as warnings, not failures.
+	// Any other error means sign-in itself did not complete.
 	SignIn(ctx context.Context) error
 
 	// SignOut clears the in-memory JWT, removes the opaque token from the
@@ -182,16 +200,28 @@ func (c *authClient) SignIn(ctx context.Context) error {
 	select {
 	case token := <-tokenCh:
 		// Store in memory regardless of keychain outcome so the session works
-		// immediately. If keychain save fails (e.g. Windows Credential Manager
-		// unavailable), the token is lost on restart but the current session
-		// continues.
+		// immediately.
 		c.mu.Lock()
 		c.opaqueToken = token
 		c.mu.Unlock()
-		if err := c.kc.Save(token); err != nil {
-			slog.Warn("auth: keychain save failed; token kept in memory only", "err", err)
+
+		// Persist. keychain.New chains the OS keychain → encrypted file fallback.
+		switch err := c.kc.Save(token); {
+		case err == nil:
+			slog.Info("auth: opaque token saved to OS keychain", "token_bytes", len(token))
+			return nil
+		case errors.Is(err, keychain.ErrUsedFallback):
+			// Durable, but the OS keychain is broken (e.g. Windows Credential
+			// Manager full → ERROR_NOT_ENOUGH_MEMORY). Warn loudly; survives restart.
+			slog.Warn("auth: OS keychain unavailable; token saved to encrypted fallback file",
+				"err", err, "token_bytes", len(token))
+			return ErrSignedInDegraded
+		default:
+			// Nothing persisted: in-memory only, lost on restart.
+			slog.Error("auth: could not persist token; in-memory only, sign-in will NOT survive restart",
+				"err", err, "token_bytes", len(token))
+			return ErrSignedInNotPersisted
 		}
-		return nil
 	case err := <-errCh:
 		return err
 	case <-timer.C:
