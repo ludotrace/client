@@ -45,6 +45,16 @@ type Tray struct {
 	stateCh       chan State
 	errorMsg      string
 	uploadingGame string
+
+	updateCh          chan updateNote
+	pendingRestartFn  func(pendingPath string)
+	pendingUpdatePath string
+}
+
+type updateNote struct {
+	version     string
+	pendingPath string
+	restartFn   func(pendingPath string) // called when "Restart to Update" is clicked
 }
 
 // SetHasGames records whether any games are configured, so the sign-in handler
@@ -55,14 +65,27 @@ func (t *Tray) SetHasGames(v bool) {
 
 func New(a auth.Client, q *queue.Queue, coreURL, appURL, version string) *Tray {
 	return &Tray{
-		auth:    a,
-		q:       q,
-		coreURL: coreURL,
-		appURL:  appURL,
-		version: version,
-		// Buffer so SetState never blocks a caller.
-		stateCh: make(chan State, 8),
+		auth:     a,
+		q:        q,
+		coreURL:  coreURL,
+		appURL:   appURL,
+		version:  version,
+		stateCh:  make(chan State, 8),
+		updateCh: make(chan updateNote, 1),
 	}
+}
+
+// NotifyUpdateReady surfaces the "Restart to Update" tray item.
+// restartFn is called when the user clicks that item; it should
+// exec the pending binary and exit the current process.
+func (t *Tray) NotifyUpdateReady(newVersion, pendingPath string, restartFn func(pendingPath string)) {
+	// Non-blocking: if a note is already queued the new one replaces it
+	// (draining first). Only one pending update exists at a time.
+	select {
+	case <-t.updateCh:
+	default:
+	}
+	t.updateCh <- updateNote{version: newVersion, pendingPath: pendingPath, restartFn: restartFn}
 }
 
 // Run starts the systray event loop. Blocks until the tray is quit.
@@ -118,6 +141,10 @@ type menuItems struct {
 
 	// Always visible — not included in hideAll.
 	versionItem *systray.MenuItem
+
+	// Update notification — shown when a staged update is waiting.
+	updateLabel   *systray.MenuItem
+	restartUpdate *systray.MenuItem
 }
 
 func buildMenu() *menuItems {
@@ -147,6 +174,13 @@ func buildMenu() *menuItems {
 	m.versionItem = systray.AddMenuItem("", "")
 	m.versionItem.Disable()
 
+	// Update items — hidden until a staged update is ready.
+	m.updateLabel = systray.AddMenuItem("", "")
+	m.updateLabel.Disable()
+	m.restartUpdate = systray.AddMenuItem("Restart to Update", "")
+	m.updateLabel.Hide()
+	m.restartUpdate.Hide()
+
 	return m
 }
 
@@ -162,6 +196,7 @@ func (t *Tray) onReady() {
 	t.applyState(StateIdle, m)
 
 	go t.stateLoop(m)
+	go t.updateLoop(m)
 	go t.clickLoop(m)
 }
 
@@ -170,6 +205,17 @@ func (t *Tray) onExit() {}
 func (t *Tray) stateLoop(m *menuItems) {
 	for s := range t.stateCh {
 		t.applyState(s, m)
+	}
+}
+
+func (t *Tray) updateLoop(m *menuItems) {
+	for note := range t.updateCh {
+		m.updateLabel.SetTitle(fmt.Sprintf("Update %s ready", note.version))
+		m.updateLabel.Show()
+		m.restartUpdate.Show()
+		// Store the restart function so clickLoop can invoke it.
+		t.pendingRestartFn = note.restartFn
+		t.pendingUpdatePath = note.pendingPath
 	}
 }
 
@@ -313,6 +359,11 @@ func (t *Tray) clickLoop(m *menuItems) {
 					t.SetError(err.Error())
 				}
 			}()
+
+		case <-m.restartUpdate.ClickedCh:
+			if t.pendingRestartFn != nil {
+				t.pendingRestartFn(t.pendingUpdatePath)
+			}
 
 		case <-m.retry.ClickedCh:
 			t.SetState(StateIdle)
