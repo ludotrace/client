@@ -12,8 +12,11 @@ func TestParseSemver(t *testing.T) {
 	}{
 		{"1.2.3", semver{1, 2, 3}, false},
 		{"v1.2.3", semver{1, 2, 3}, false},
-		{"v1.2.3-4-gabcdef", semver{1, 2, 3}, false},
+		// dirty / untagged builds — must be rejected
+		{"v1.2.3-4-gabcdef", semver{}, true},
 		{"dev", semver{}, true},
+		{"1.2.3-beta.1", semver{}, true},
+		// malformed
 		{"1.2", semver{}, true},
 		{"1.2.x", semver{}, true},
 	}

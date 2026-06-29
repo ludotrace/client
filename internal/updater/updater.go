@@ -56,9 +56,14 @@ type Updater struct {
 
 // New creates an Updater. configDir is the LudoTrace config directory
 // (e.g. %APPDATA%\ludotrace on Windows).
+// LUDOTRACE_MANIFEST_URL overrides the compiled-in ManifestURL for testing.
 func New(configDir string) *Updater {
+	url := ManifestURL
+	if override := os.Getenv("LUDOTRACE_MANIFEST_URL"); override != "" {
+		url = override
+	}
 	return &Updater{
-		manifestURL: ManifestURL,
+		manifestURL: url,
 		configDir:   configDir,
 		httpClient:  &http.Client{Timeout: 30 * time.Second},
 	}
@@ -197,17 +202,22 @@ func PendingPath(configDir string) string {
 // semver holds a parsed major.minor.patch triple.
 type semver struct{ major, minor, patch int }
 
+// parseSemver parses a clean release version string (e.g. "v1.2.3" or "1.2.3").
+// Any string containing a "-" after the optional "v" prefix is rejected — this
+// covers "dev", dirty git-describe strings ("v1.2.3-4-gabcdef"), and pre-release
+// labels, all of which should not be auto-updated.
 func parseSemver(s string) (semver, error) {
 	s = strings.TrimPrefix(s, "v")
+	if strings.Contains(s, "-") {
+		return semver{}, fmt.Errorf("not a release build: %q", s)
+	}
 	parts := strings.SplitN(s, ".", 3)
 	if len(parts) != 3 {
 		return semver{}, fmt.Errorf("not a semver: %q", s)
 	}
-	// strip any pre-release suffix from the patch segment
-	patch := strings.SplitN(parts[2], "-", 2)[0]
 	major, err1 := strconv.Atoi(parts[0])
 	minor, err2 := strconv.Atoi(parts[1])
-	p, err3 := strconv.Atoi(patch)
+	p, err3 := strconv.Atoi(parts[2])
 	if err1 != nil || err2 != nil || err3 != nil {
 		return semver{}, fmt.Errorf("not a semver: %q", s)
 	}
