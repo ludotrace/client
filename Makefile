@@ -3,8 +3,10 @@
 BINARY  := ludotrace
 DIST    := dist
 PKG     := ./cmd/ludotrace
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGSBASE := -X main.version=$(VERSION)
+VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+MANIFEST_URL := https://ludotrace.com/client/version.json
+LDFLAGSBASE := -X github.com/ludotrace/client/internal/version.Version=$(VERSION) \
+               -X github.com/ludotrace/client/internal/updater.ManifestURL=$(MANIFEST_URL)
 
 build:
 	mkdir -p $(DIST)

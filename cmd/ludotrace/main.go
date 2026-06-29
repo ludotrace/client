@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -17,13 +19,21 @@ import (
 	"github.com/ludotrace/client/internal/queue"
 	"github.com/ludotrace/client/internal/session"
 	"github.com/ludotrace/client/internal/tray"
+	"github.com/ludotrace/client/internal/updater"
 	"github.com/ludotrace/client/internal/uploader"
+	"github.com/ludotrace/client/internal/version"
 	"github.com/ludotrace/client/internal/watcher"
 )
 
-var version = "dev"
-
 func main() {
+	// --finish-update <original-path> [args...]
+	// Run by the pending binary after the user clicks "Restart to Update".
+	// Copies itself over the original path, deletes itself, relaunches.
+	if len(os.Args) >= 3 && os.Args[1] == "--finish-update" {
+		finishUpdate(os.Args[2], os.Args[3:])
+		return
+	}
+
 	level := slog.LevelInfo
 	if strings.ToLower(os.Getenv("LUDOTRACE_LOG_LEVEL")) == "debug" {
 		level = slog.LevelDebug
@@ -88,7 +98,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	t := tray.New(authClient, q, cfg.CoreURL, cfg.AppURL, version)
+	t := tray.New(authClient, q, cfg.CoreURL, cfg.AppURL, version.Version)
 	t.SetHasGames(len(cfg.Games) > 0)
 
 	if !authClient.IsSignedIn() {
@@ -120,15 +130,149 @@ func main() {
 		}
 	}()
 
+	// Re-surface a previously staged update that hasn't been applied yet.
+	pendingPath := updater.PendingPath(cfgDir)
+	if _, err := os.Stat(pendingPath); err == nil {
+		slog.Info("previously staged update found, surfacing tray item")
+		t.NotifyUpdateReady("(staged)", pendingPath, makeRestartFn())
+	}
+
+	go runUpdateWorker(ctx, cfgDir, t)
+
 	// Bridge signal cancellation → systray shutdown.
 	go func() {
 		<-ctx.Done()
 		t.Quit()
 	}()
 
-	slog.Info("ludotrace client started", "core_url", cfg.CoreURL, "app_url", cfg.AppURL, "games", len(cfg.Games))
-	t.Run() // blocks main goroutine until Quit() or systray exit
+	slog.Info("ludotrace client started",
+		"core_url", cfg.CoreURL,
+		"app_url", cfg.AppURL,
+		"games", len(cfg.Games),
+		"version", version.Version,
+	)
+	t.Run() // blocks until Quit() or systray exit
 	stop()
+}
+
+// runUpdateWorker checks for a newer version on startup then on a
+// server-controlled interval (default 24 h).
+func runUpdateWorker(ctx context.Context, cfgDir string, t *tray.Tray) {
+	u := updater.New(cfgDir)
+	interval := 4 * time.Hour
+
+	doCheck := func() {
+		upd, next, err := u.Check(ctx)
+		if err != nil {
+			slog.Warn("version check failed", "err", err)
+		}
+		if next > 0 {
+			interval = next
+		}
+		if upd == nil {
+			return
+		}
+		pendingPath, err := u.Stage(ctx, upd)
+		if err != nil {
+			slog.Warn("failed to stage update", "version", upd.Version, "err", err)
+			return
+		}
+		t.NotifyUpdateReady(upd.Version, pendingPath, makeRestartFn())
+	}
+
+	doCheck()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+			doCheck()
+		}
+	}
+}
+
+// makeRestartFn returns the function passed to tray.NotifyUpdateReady.
+// When the user clicks "Restart to Update" the pending binary is launched
+// with --finish-update pointing at the current install path, then this
+// process exits.
+func makeRestartFn() func(pendingPath string) {
+	return func(pendingPath string) {
+		self, err := os.Executable()
+		if err != nil {
+			slog.Error("restart: could not resolve current executable", "err", err)
+			return
+		}
+		args := append([]string{"--finish-update", self}, os.Args[1:]...)
+		cmd := exec.Command(pendingPath, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			slog.Error("restart: failed to launch pending binary", "err", err)
+			return
+		}
+		os.Exit(0)
+	}
+}
+
+// finishUpdate is run by the newly-downloaded binary via --finish-update.
+// It copies itself over originalPath, deletes the pending binary, then
+// relaunches from the proper install location.
+func finishUpdate(originalPath string, remainingArgs []string) {
+	self, err := os.Executable()
+	if err != nil {
+		slog.Error("finish-update: resolve self", "err", err)
+		os.Exit(1)
+	}
+
+	src, err := os.Open(self)
+	if err != nil {
+		slog.Error("finish-update: open self", "err", err)
+		os.Exit(1)
+	}
+
+	dir := filepath.Dir(originalPath)
+	tmp, err := os.CreateTemp(dir, "ludotrace-install-*")
+	if err != nil {
+		src.Close()
+		slog.Error("finish-update: create temp", "err", err)
+		os.Exit(1)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		src.Close()
+		os.Remove(tmpPath)
+		slog.Error("finish-update: copy binary", "err", err)
+		os.Exit(1)
+	}
+	tmp.Close()
+	src.Close()
+
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		os.Remove(tmpPath)
+		slog.Error("finish-update: chmod", "err", err)
+		os.Exit(1)
+	}
+
+	if err := os.Rename(tmpPath, originalPath); err != nil {
+		os.Remove(tmpPath)
+		slog.Error("finish-update: rename", "err", err)
+		os.Exit(1)
+	}
+
+	// Remove the pending binary (self).
+	_ = os.Remove(self)
+
+	cmd := exec.Command(originalPath, remainingArgs...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		slog.Error("finish-update: relaunch", "err", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors map[string]*session.Extractor, t *tray.Tray) {
@@ -195,7 +339,6 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 
 		if errors.Is(err, uploader.ErrUnauthorized) {
 			t.SetState(tray.StateNotAuth)
-			// Trigger a refresh so the next iteration has a fresh token.
 			_, _ = authClient.GetToken(ctx)
 			select {
 			case <-ctx.Done():
