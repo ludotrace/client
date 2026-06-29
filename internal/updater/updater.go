@@ -186,8 +186,24 @@ func (u *Updater) Stage(ctx context.Context, upd *Update) (string, error) {
 		return "", fmt.Errorf("stage binary: %w", err)
 	}
 
+	// Record the staged version in a sidecar so startup can tell a genuine
+	// pending update apart from a stale binary left over after a prior apply
+	// (the running process cannot delete itself on Windows; see ClearStaged).
+	meta, err := json.Marshal(pendingMeta{Version: upd.Version})
+	if err != nil {
+		return "", fmt.Errorf("marshal pending meta: %w", err)
+	}
+	if err := os.WriteFile(PendingMetaPath(u.configDir), meta, 0o600); err != nil {
+		return "", fmt.Errorf("write pending meta: %w", err)
+	}
+
 	slog.Info("updater: update staged", "version", upd.Version, "path", pendingPath)
 	return pendingPath, nil
+}
+
+// pendingMeta is the JSON sidecar recording the staged binary's version.
+type pendingMeta struct {
+	Version string `json:"version"`
 }
 
 // PendingPath returns the path where a staged update binary is stored.
@@ -197,6 +213,51 @@ func PendingPath(configDir string) string {
 		name += ".exe"
 	}
 	return filepath.Join(configDir, name)
+}
+
+// PendingMetaPath returns the path of the staged update's version sidecar.
+func PendingMetaPath(configDir string) string {
+	return filepath.Join(configDir, "pending_update.json")
+}
+
+// StagedVersion reports the version of a currently-staged update, reading the
+// sidecar written by Stage. ok is false when no readable sidecar exists.
+func StagedVersion(configDir string) (version string, ok bool) {
+	data, err := os.ReadFile(PendingMetaPath(configDir))
+	if err != nil {
+		return "", false
+	}
+	var meta pendingMeta
+	if err := json.Unmarshal(data, &meta); err != nil || meta.Version == "" {
+		return "", false
+	}
+	return meta.Version, true
+}
+
+// ClearStaged removes the staged binary and its sidecar. Missing files are not
+// an error. Used to drop a stale staged update after it has been applied — the
+// freshly relaunched (install-path) process can delete the pending binary
+// because the pending process that wrote it has already exited.
+func ClearStaged(configDir string) error {
+	if err := os.Remove(PendingPath(configDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(PendingMetaPath(configDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// IsNewer reports whether release version a is strictly newer than b.
+// Returns false if either is not a clean release semver (e.g. "dev"), so a
+// dev build never treats a staged release as something to auto-prompt.
+func IsNewer(a, b string) bool {
+	av, err1 := parseSemver(a)
+	bv, err2 := parseSemver(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return newerThan(av, bv)
 }
 
 // semver holds a parsed major.minor.patch triple.

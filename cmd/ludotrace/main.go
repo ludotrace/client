@@ -138,11 +138,20 @@ func main() {
 		}
 	}()
 
-	// Re-surface a previously staged update that hasn't been applied yet.
-	pendingPath := updater.PendingPath(cfgDir)
-	if _, err := os.Stat(pendingPath); err == nil {
-		slog.Info("previously staged update found, surfacing tray item")
-		t.NotifyUpdateReady("(staged)", pendingPath, makeRestartFn())
+	// Reconcile any staged update left on disk. A staged binary newer than the
+	// running version is a genuine pending update → re-surface the tray item.
+	// One that is not newer is a stale leftover from an already-applied update
+	// (the pending process could not delete itself on Windows) → clear it now
+	// that we are the relaunched install-path process and the file is unlocked.
+	if stagedVer, ok := updater.StagedVersion(cfgDir); ok {
+		if updater.IsNewer(stagedVer, version.Version) {
+			slog.Info("previously staged update found, surfacing tray item", "version", stagedVer)
+			t.NotifyUpdateReady(stagedVer, updater.PendingPath(cfgDir), makeRestartFn())
+		} else if err := updater.ClearStaged(cfgDir); err != nil {
+			slog.Warn("failed to clear stale staged update", "err", err)
+		} else {
+			slog.Info("cleared stale staged update", "staged_version", stagedVer, "running_version", version.Version)
+		}
 	}
 
 	go runUpdateWorker(ctx, cfgDir, t)
@@ -312,7 +321,12 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 		os.Exit(1)
 	}
 
-	// Remove the pending binary (self).
+	// Best-effort remove of the pending binary (self). This succeeds on
+	// Unix (a running binary can be unlinked) but fails on Windows, where a
+	// running .exe is locked. The leftover is reconciled on next startup by
+	// the relaunched install-path process via updater.ClearStaged — by then
+	// this process has exited and the file is unlocked. The sidecar is also
+	// cleared there, so leaving it in place here is intentional.
 	_ = os.Remove(self)
 
 	cmd := exec.Command(originalPath, remainingArgs...)
