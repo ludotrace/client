@@ -40,6 +40,14 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
+	// --check-update: one-shot. Runs the same Check+Stage path as the
+	// background worker, logs the outcome, and exits. Does not take the
+	// singleton lock or start the tray, so it can run alongside a live
+	// instance. Intended for development testing and ops diagnostics.
+	if len(os.Args) >= 2 && os.Args[1] == "--check-update" {
+		os.Exit(runCheckUpdate())
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "err", err)
@@ -162,22 +170,13 @@ func runUpdateWorker(ctx context.Context, cfgDir string, t *tray.Tray) {
 	interval := 4 * time.Hour
 
 	doCheck := func() {
-		upd, next, err := u.Check(ctx)
-		if err != nil {
-			slog.Warn("version check failed", "err", err)
-		}
+		upd, pendingPath, next := checkAndStage(ctx, u)
 		if next > 0 {
 			interval = next
 		}
-		if upd == nil {
-			return
+		if upd != nil && pendingPath != "" {
+			t.NotifyUpdateReady(upd.Version, pendingPath, makeRestartFn())
 		}
-		pendingPath, err := u.Stage(ctx, upd)
-		if err != nil {
-			slog.Warn("failed to stage update", "version", upd.Version, "err", err)
-			return
-		}
-		t.NotifyUpdateReady(upd.Version, pendingPath, makeRestartFn())
 	}
 
 	doCheck()
@@ -189,6 +188,57 @@ func runUpdateWorker(ctx context.Context, cfgDir string, t *tray.Tray) {
 		case <-time.After(interval):
 			doCheck()
 		}
+	}
+}
+
+// checkAndStage runs one version check and, if a newer version is available,
+// stages it. Returns the update, the staged binary path (empty if nothing was
+// staged), and the interval until the next check. Shared by the background
+// worker and the --check-update one-shot.
+func checkAndStage(ctx context.Context, u *updater.Updater) (*updater.Update, string, time.Duration) {
+	upd, next, err := u.Check(ctx)
+	if err != nil {
+		slog.Warn("version check failed", "err", err)
+	}
+	if upd == nil {
+		return nil, "", next
+	}
+	pendingPath, err := u.Stage(ctx, upd)
+	if err != nil {
+		slog.Warn("failed to stage update", "version", upd.Version, "err", err)
+		return upd, "", next
+	}
+	return upd, pendingPath, next
+}
+
+// runCheckUpdate is the --check-update one-shot. It performs a single
+// check-and-stage cycle and reports the outcome. Returns a process exit code:
+// 0 = up to date / dev build skipped / staged successfully, 1 = staging error.
+func runCheckUpdate() int {
+	cfgDir, err := config.Dir()
+	if err != nil {
+		slog.Error("failed to resolve config dir", "err", err)
+		return 1
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		slog.Error("failed to create config dir", "err", err)
+		return 1
+	}
+
+	slog.Info("running one-shot update check", "version", version.Version)
+	u := updater.New(cfgDir)
+	upd, pendingPath, _ := checkAndStage(context.Background(), u)
+
+	switch {
+	case upd == nil:
+		slog.Info("no update available", "current", version.Version)
+		return 0
+	case pendingPath == "":
+		slog.Error("update found but staging failed", "version", upd.Version)
+		return 1
+	default:
+		slog.Info("update staged and ready", "version", upd.Version, "pending_path", pendingPath)
+		return 0
 	}
 }
 
