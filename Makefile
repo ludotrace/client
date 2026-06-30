@@ -32,7 +32,7 @@ build-windows:
 	rm -f $(DIST)/$(BINARY).exe
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui $(LDFLAGSBASE)" -o $(DIST)/$(BINARY).exe $(PKG)
 
-# Requires: pkg-config libgtk-3-dev libappindicator3-dev gnome-keyring
+# Requires: pkg-config libgtk-3-dev libayatana-appindicator3-dev gnome-keyring
 build-linux:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY)-linux

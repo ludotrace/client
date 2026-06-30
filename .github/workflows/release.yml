@@ -33,7 +33,7 @@ jobs:
       # systray needs CGO + GTK to build the Linux binary.
       - name: Install Linux build deps
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libappindicator3-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
 
       # Windows is pure-Go (CGO off); Linux is CGO+GTK. Both build on ubuntu.
       - name: Build Windows + Linux
