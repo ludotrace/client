@@ -29,10 +29,11 @@ type State int
 const (
 	StateIdle         State = iota // authenticated, nothing uploading
 	StateUploading                 // upload in flight
-	StateError                     // last upload attempt failed
+	StateError                     // last upload attempt failed permanently
 	StateLimitReached              // 429 from Core
 	StateNotAuth                   // not signed in
 	StateNoGames                   // authenticated but no games configured
+	StateQueued                    // transient failure: sessions queued, retrying with backoff
 )
 
 type Tray struct {
@@ -44,7 +45,9 @@ type Tray struct {
 	hasGames      bool
 	stateCh       chan State
 	errorMsg      string
+	queuedMsg     string
 	uploadingGame string
+	retryCh       chan struct{}
 
 	updateCh          chan updateNote
 	pendingRestartFn  func(pendingPath string)
@@ -72,6 +75,7 @@ func New(a auth.Client, q *queue.Queue, coreURL, appURL, version string) *Tray {
 		version:  version,
 		stateCh:  make(chan State, 8),
 		updateCh: make(chan updateNote, 1),
+		retryCh:  make(chan struct{}, 1),
 	}
 }
 
@@ -110,6 +114,21 @@ func (t *Tray) SetError(msg string) {
 	t.SetState(StateError)
 }
 
+// SetQueued sets the queued status line (e.g. "2 sessions queued — retrying in
+// 5m") and transitions to StateQueued. Used for transient/offline failures,
+// which are recoverable and should not alarm the user like StateError.
+func (t *Tray) SetQueued(msg string) {
+	t.queuedMsg = msg
+	t.SetState(StateQueued)
+}
+
+// RetryCh returns a channel that receives a signal when the user clicks
+// "Retry Now". The upload worker selects on it to break its backoff sleep and
+// retry immediately. Sends are non-blocking, so signals are coalesced.
+func (t *Tray) RetryCh() <-chan struct{} {
+	return t.retryCh
+}
+
 // SetUploading sets the game name displayed during upload and transitions to StateUploading.
 func (t *Tray) SetUploading(gameName string) {
 	t.uploadingGame = gameName
@@ -126,6 +145,7 @@ type menuItems struct {
 	manageGames *systray.MenuItem
 	openDash    *systray.MenuItem
 	retry       *systray.MenuItem
+	retryNow    *systray.MenuItem
 	signOut     *systray.MenuItem
 	quit        *systray.MenuItem
 
@@ -160,6 +180,7 @@ func buildMenu() *menuItems {
 	m.manageGames = systray.AddMenuItem("Manage Games", "")
 	m.openDash = systray.AddMenuItem("Open Dashboard", "")
 	m.retry = systray.AddMenuItem("Retry", "")
+	m.retryNow = systray.AddMenuItem("Retry Now", "")
 	m.signOut = systray.AddMenuItem("Sign Out", "")
 	m.quit = systray.AddMenuItem("Quit", "")
 
@@ -243,6 +264,13 @@ func (t *Tray) applyState(s State, m *menuItems) {
 		m.statusLine.SetTitle("Free upload limit reached")
 		showAuthenticatedBase(m, false)
 
+	case StateQueued:
+		// Recoverable, not broken — keep the normal mark, not the error icon.
+		systray.SetIcon(iconIdle)
+		m.statusLine.SetTitle(t.queuedMsg)
+		showAuthenticatedBase(m, false)
+		m.retryNow.Show()
+
 	case StateNotAuth:
 		m.signIn.Show()
 		m.quitNA.Show()
@@ -274,6 +302,7 @@ func hideAll(m *menuItems) {
 	m.manageGames.Hide()
 	m.openDash.Hide()
 	m.retry.Hide()
+	m.retryNow.Hide()
 	m.signOut.Hide()
 	m.quit.Hide()
 
@@ -367,6 +396,14 @@ func (t *Tray) clickLoop(m *menuItems) {
 
 		case <-m.retry.ClickedCh:
 			t.SetState(StateIdle)
+
+		case <-m.retryNow.ClickedCh:
+			// Non-blocking: if a signal is already pending, the worker hasn't
+			// consumed it yet — one retry is enough.
+			select {
+			case t.retryCh <- struct{}{}:
+			default:
+			}
 
 		case <-m.quit.ClickedCh:
 			systray.Quit()

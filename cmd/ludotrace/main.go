@@ -343,6 +343,8 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 }
 
 func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors map[string]*session.Extractor, t *tray.Tray) {
+	var backoff uploadBackoff
+	retryCh := t.RetryCh()
 	for {
 		select {
 		case <-ctx.Done():
@@ -400,6 +402,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 				slog.Warn("failed to remove queue item", "err", rerr)
 			}
 			slog.Info("upload succeeded", "game_id", item.GameID, "job_id", jobID)
+			backoff.reset()
 			t.SetState(tray.StateIdle)
 			continue
 		}
@@ -434,14 +437,19 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			continue
 		}
 
-		// ErrTransient or unknown.
+		// ErrTransient or unknown — recoverable. Queue the sessions and retry
+		// with escalating backoff rather than alarming the user with an error.
 		slog.Warn("upload failed transiently", "game_id", item.GameID, "err", err)
 		_ = q.UpdateAttempts(item.TmpPath)
-		t.SetError(err.Error())
+		delay := backoff.next()
+		t.SetQueued(queuedMessage(q.Len(), delay))
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(30 * time.Second):
+		case <-time.After(delay):
+		case <-retryCh:
+			slog.Info("retry requested — resetting backoff")
+			backoff.reset()
 		}
 	}
 }
