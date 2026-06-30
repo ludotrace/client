@@ -10,10 +10,17 @@ permissions:
 
 jobs:
   build:
-    name: Build binaries
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # If one platform fails, stop — a partial release must never publish.
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-windows
+          - os: macos-latest
+            name: macos
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,27 +30,36 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Set version output
-        id: version
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
+      # systray needs CGO + GTK to build the Linux binary.
       - name: Install Linux build deps
-        run: sudo apt-get install -y libgtk-3-dev libappindicator3-dev
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
 
-      - name: Build all platforms
-        run: make build-all
+      # Windows is pure-Go (CGO off); Linux is CGO+GTK. Both build on ubuntu.
+      - name: Build Windows + Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: make build-windows build-linux
 
+      # darwin/systray needs CGO + Cocoa — only available on a macOS runner.
+      # Cannot be cross-compiled from ubuntu (Go disables CGO when cross-
+      # compiling, and there is no macOS toolchain on the Linux runner).
+      - name: Build macOS (x64 + arm64)
+        if: matrix.os == 'macos-latest'
+        run: make build-mac build-mac-arm
+
+      # shasum is present on both ubuntu and macOS runners; sha256sum is not
+      # on stock macOS. The publish job only reads field 1 (the hash).
       - name: Compute SHA-256 checksums
         working-directory: dist
         run: |
-          sha256sum ludotrace-mac-x64  > ludotrace-mac-x64.sha256
-          sha256sum ludotrace-mac-arm64 > ludotrace-mac-arm64.sha256
-          sha256sum ludotrace.exe       > ludotrace.exe.sha256
-          sha256sum ludotrace-linux     > ludotrace-linux.sha256
+          for f in *; do
+            case "$f" in *.sha256) continue ;; esac
+            shasum -a 256 "$f" > "$f.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-binaries
+          name: binaries-${{ matrix.name }}
           path: dist/
           retention-days: 1
 
@@ -54,13 +70,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-binaries
+          pattern: binaries-*
+          merge-multiple: true
           path: dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build.outputs.version }}
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           # No binary assets attached — binaries are served from ludotrace.com/downloads/
 
@@ -71,7 +88,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-binaries
+          pattern: binaries-*
+          merge-multiple: true
           path: dist/
 
       - name: Checkout site repo
@@ -91,7 +109,7 @@ jobs:
 
       - name: Write version manifest
         env:
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ github.ref_name }}
         run: |
           SHA_MAC_X64=$(awk '{print $1}' dist/ludotrace-mac-x64.sha256)
           SHA_MAC_ARM=$(awk '{print $1}' dist/ludotrace-mac-arm64.sha256)
@@ -118,5 +136,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add downloads/ client/version.json
-          git commit -m "release: client ${{ needs.build.outputs.version }}"
+          git commit -m "release: client ${{ github.ref_name }}"
           git push

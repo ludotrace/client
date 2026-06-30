@@ -13,22 +13,26 @@ build:
 	rm -f $(DIST)/$(BINARY)
 	go build -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY) $(PKG)
 
+# CGO_ENABLED=1 is explicit: systray needs CGO (Cocoa) on darwin, and Go
+# disables CGO by default when GOARCH != host arch. On an arm64 macOS runner
+# the amd64 target is a cross-arch build, so without this the Cocoa symbols
+# drop out. Must run on a macOS host (clang + macOS SDK target both arches).
 build-mac:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY)-mac-x64
-	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY)-mac-x64 $(PKG)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY)-mac-x64 $(PKG)
 
 build-mac-arm:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY)-mac-arm64
-	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY)-mac-arm64 $(PKG)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY)-mac-arm64 $(PKG)
 
 build-windows:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY).exe
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui $(LDFLAGSBASE)" -o $(DIST)/$(BINARY).exe $(PKG)
 
-# Requires: pkg-config libgtk-3-dev libappindicator3-dev gnome-keyring
+# Requires: pkg-config libgtk-3-dev libayatana-appindicator3-dev gnome-keyring
 build-linux:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY)-linux

@@ -31,3 +31,28 @@ jobs:
           name: ludotrace-windows
           path: dist/ludotrace.exe
           retention-days: 7
+
+  # Exercise the CGO/Cocoa darwin build and the CGO+GTK linux build on every
+  # push — these cannot be cross-compiled from the Windows build host, so a
+  # build break (e.g. a systray API change) is otherwise invisible until a
+  # release tag. Mirrors the matrix in release.yml.
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make build-mac build-mac-arm
+
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+      - run: make build-linux
