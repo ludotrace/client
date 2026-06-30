@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ludotrace/client/internal/auth"
+	"github.com/ludotrace/client/internal/autostart"
 	"github.com/ludotrace/client/internal/config"
 	"github.com/ludotrace/client/internal/keychain"
 	"github.com/ludotrace/client/internal/queue"
@@ -76,6 +77,8 @@ func main() {
 	}
 	lockFile.Close()
 	defer os.Remove(lockPath)
+
+	autostart.Register()
 
 	credPath, err := config.CredentialPath()
 	if err != nil {
