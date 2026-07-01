@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -10,8 +11,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/sqweek/dialog"
 
 	"github.com/ludotrace/client/internal/auth"
 	"github.com/ludotrace/client/internal/autostart"
@@ -19,6 +23,7 @@ import (
 	"github.com/ludotrace/client/internal/keychain"
 	"github.com/ludotrace/client/internal/queue"
 	"github.com/ludotrace/client/internal/session"
+	"github.com/ludotrace/client/internal/steam"
 	"github.com/ludotrace/client/internal/tray"
 	"github.com/ludotrace/client/internal/updater"
 	"github.com/ludotrace/client/internal/uploader"
@@ -99,11 +104,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	extractors := make(map[string]*session.Extractor)
+	// extractors is written by the startup loop below and, after startup, by
+	// the Add Game handler (on its own goroutine); it is read concurrently
+	// by the watcher callback and the upload worker. extractorStore guards
+	// all of that with a mutex — a plain map here would race once Add Game
+	// can add entries into an already-running process.
+	extractors := newExtractorStore()
 	for _, g := range cfg.Games {
 		eventsPath := filepath.Join(g.WatchPath, g.EventsFile)
 		offsetPath, _ := config.OffsetPath(g.GameID)
-		extractors[g.GameID] = session.New(g.GameID, eventsPath, offsetPath, os.TempDir(), q)
+		extractors.set(g.GameID, session.New(g.GameID, eventsPath, offsetPath, os.TempDir(), q))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -121,7 +131,7 @@ func main() {
 	go runUploadWorker(ctx, cfg, authClient, q, extractors, t)
 
 	cb := func(gameID string) {
-		ext, ok := extractors[gameID]
+		ext, ok := extractors.get(gameID)
 		if !ok {
 			return
 		}
@@ -140,6 +150,11 @@ func main() {
 			slog.Error("watcher stopped", "err", err)
 		}
 	}()
+
+	// gamesMu serializes Add Game handler runs (concurrent clicks) and
+	// guards cfg.Games appends alongside extractors' own locking.
+	var gamesMu sync.Mutex
+	t.SetAddGameHandler(makeAddGameHandler(&gamesMu, cfg, q, w, extractors, t))
 
 	// Reconcile any staged update left on disk. A staged binary newer than the
 	// running version is a genuine pending update → re-surface the tray item.
@@ -342,7 +357,7 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 	os.Exit(0)
 }
 
-func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors map[string]*session.Extractor, t *tray.Tray) {
+func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors *extractorStore, t *tray.Tray) {
 	var backoff uploadBackoff
 	retryCh := t.RetryCh()
 	for {
@@ -390,7 +405,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 
 		jobID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token)
 		if err == nil {
-			if ext, ok := extractors[item.GameID]; ok {
+			if ext, ok := extractors.get(item.GameID); ok {
 				if aerr := ext.AdvanceOffset(item.EndOffset); aerr != nil {
 					slog.Error("failed to advance offset", "game_id", item.GameID, "err", aerr)
 				}
@@ -452,4 +467,220 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			backoff.reset()
 		}
 	}
+}
+
+// extractorStore is a mutex-guarded map[string]*session.Extractor. Before
+// Add Game, this map was only ever written once at startup (before any
+// other goroutine existed) and read concurrently thereafter by the watcher
+// callback and the upload worker — safe without locking. Add Game now
+// writes into it from a live goroutine after startup, so a plain map would
+// race; this wrapper is the minimal fix.
+type extractorStore struct {
+	mu   sync.RWMutex
+	byID map[string]*session.Extractor
+}
+
+func newExtractorStore() *extractorStore {
+	return &extractorStore{byID: make(map[string]*session.Extractor)}
+}
+
+func (s *extractorStore) get(gameID string) (*session.Extractor, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.byID[gameID]
+	return e, ok
+}
+
+func (s *extractorStore) set(gameID string, e *session.Extractor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byID[gameID] = e
+}
+
+// makeAddGameHandler composes the Add Game flow: Steam auto-discovery,
+// falling to the folder-picker (recognized-folder resolution or a
+// known-games prompt for an unrecognized one) when nothing new was found,
+// then writing the result to config.toml and registering it with the live
+// watcher/extractor — all without a restart.
+//
+// gamesMu serializes concurrent invocations (e.g. a double-click on "Add
+// Game") so cfg.Games appends and extractor registration can't race each
+// other.
+//
+// w.AddGame is called before config.AppendGame (the reverse of a strictly
+// literal reading of the spec's task list) so that a path which vanishes
+// between pick and add — the one case the whole flow has to guard against —
+// fails before anything is written to config.toml. Writing the config
+// entry first and having w.AddGame fail afterwards would leave a zombie
+// config.toml row that the dedupe guard (steam.DedupeNew / the picker's
+// "already added" check) would treat as already-configured, permanently
+// blocking any future retry short of hand-editing the file.
+//
+// The extractor is registered before w.AddGame makes the watch live, not
+// after: a WRITE event landing in the window between "watch goes live" and
+// "extractor registered" would hit cb in main.go, find no extractor, and be
+// silently dropped. Registering the extractor first closes that window;
+// watcher.AddGame's own idempotency guard makes it safe even if AddGame
+// then fails and the whole handler is retried for the same game.
+func makeAddGameHandler(gamesMu *sync.Mutex, cfg *config.Config, q *queue.Queue, w *watcher.Watcher, extractors *extractorStore, t *tray.Tray) func() {
+	return func() {
+		gamesMu.Lock()
+		defer gamesMu.Unlock()
+
+		g, err := resolveNewGame(cfg)
+		if err != nil {
+			var aa *alreadyAddedError
+			if errors.As(err, &aa) {
+				t.NotifyGameInfo(aa.Error())
+			} else {
+				t.NotifyGameAdded("", err)
+			}
+			return
+		}
+		if g == nil {
+			// User cancelled the picker, or cancelled the unrecognized-folder
+			// prompt without picking a known game. Not an error: no
+			// confirmation, no failure message, tray stays as-is.
+			return
+		}
+
+		eventsPath := filepath.Join(g.WatchPath, g.EventsFile)
+		offsetPath, err := config.OffsetPath(g.GameID)
+		if err != nil {
+			slog.Error("add game: failed to resolve offset path", "game_id", g.GameID, "err", err)
+			t.NotifyGameAdded("", fmt.Errorf("could not resolve offset path for %q: %w", g.GameID, err))
+			return
+		}
+		extractors.set(g.GameID, session.New(g.GameID, eventsPath, offsetPath, os.TempDir(), q))
+
+		if err := w.AddGame(*g); err != nil {
+			slog.Warn("add game: watcher registration failed", "game_id", g.GameID, "err", err)
+			t.NotifyGameAdded("", fmt.Errorf("could not watch %q: %w", g.WatchPath, err))
+			return
+		}
+
+		if err := config.AppendGame(*g); err != nil {
+			slog.Error("add game: failed to write config", "game_id", g.GameID, "err", err)
+			t.NotifyGameAdded("", err)
+			return
+		}
+		cfg.Games = append(cfg.Games, *g)
+
+		t.SetHasGames(true)
+		t.SetState(tray.StateIdle)
+		t.NotifyGameAdded(displayName(g.GameID), nil)
+
+		slog.Info("game added", "game_id", g.GameID, "watch_path", g.WatchPath)
+	}
+}
+
+// alreadyAddedError signals a benign "nothing to do" outcome: the picked
+// folder resolved to a game_id already present in cfg.Games. Not a failure
+// — the caller surfaces it via NotifyGameInfo, not NotifyGameAdded's error
+// framing.
+type alreadyAddedError struct {
+	displayName string
+}
+
+func (e *alreadyAddedError) Error() string {
+	return fmt.Sprintf("%s is already added", e.displayName)
+}
+
+// resolveNewGame runs the two-stage Add Game flow and returns the game to
+// add. A nil game with a nil error means the user cancelled — the caller
+// shows neither a confirmation nor a failure.
+func resolveNewGame(cfg *config.Config) (*config.Game, error) {
+	discovered, err := steam.Discover()
+	if err != nil {
+		slog.Warn("steam discovery failed", "err", err)
+	}
+	if newGames := steam.DedupeNew(discovered, cfg.Games); len(newGames) > 0 {
+		return &newGames[0], nil
+	}
+
+	picked, err := dialog.Directory().Title("Select Game Folder").SetStartDir(pickerStartDir()).Browse()
+	if err != nil {
+		if errors.Is(err, dialog.ErrCancelled) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("folder picker: %w", err)
+	}
+	if picked == "" {
+		// Belt-and-suspenders: every sqweek/dialog backend is expected to
+		// return ErrCancelled on cancel (handled above), but an empty path
+		// reaching filepath.Base("") -> "." would otherwise flow into
+		// folder-matching as if "." had been picked. Treat it as a cancel.
+		return nil, nil
+	}
+
+	folderName := filepath.Base(picked)
+	if kg, ok := steam.MatchFolder(folderName); ok {
+		g := steam.GameFromFolder(kg, picked)
+		if gameConfigured(cfg.Games, g.GameID) {
+			return nil, &alreadyAddedError{displayName: kg.DisplayName}
+		}
+		return &g, nil
+	}
+
+	// Unrecognized folder: steam.Registry is the "dropdown" of known games,
+	// by display name, not free-text game_id (MVP-scoped to one entry —
+	// sqweek/dialog has no native list-selection widget, so each remaining
+	// candidate is offered as a Yes/No prompt instead of a real dropdown;
+	// see the spec's Design Notes for why).
+	offered := false
+	for _, kg := range steam.Registry {
+		if gameConfigured(cfg.Games, kg.GameID) {
+			continue
+		}
+		offered = true
+		prompt := fmt.Sprintf("The folder %q wasn't recognized automatically.\n\nAdd it as %q?", folderName, kg.DisplayName)
+		if dialog.Message("%s", prompt).Title("Unrecognized Folder").YesNo() {
+			g := steam.GameFromFolder(kg, picked)
+			return &g, nil
+		}
+	}
+	if !offered {
+		// Every known game is already configured — there was nothing left
+		// to offer. Without this, the loop above silently returns (nil,
+		// nil) and the user sees no feedback at all after picking a folder.
+		return nil, &alreadyAddedError{displayName: "every supported game"}
+	}
+	return nil, nil
+}
+
+// pickerStartDir defaults to Steam's common library folder when detected
+// (Windows only), else the user's home directory. See the I/O matrix's
+// "Registry read fails" row and the non-Windows acceptance criterion.
+func pickerStartDir() string {
+	if dir, ok := steam.DefaultBrowseDir(); ok {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}
+
+func gameConfigured(games []config.Game, gameID string) bool {
+	for _, g := range games {
+		if g.GameID == gameID {
+			return true
+		}
+	}
+	return false
+}
+
+// displayName looks up the known-games display name for a game_id, falling
+// back to the game_id itself if it's somehow not in the registry (shouldn't
+// happen — every config.Game this flow produces comes from steam.Registry).
+func displayName(gameID string) string {
+	for _, kg := range steam.Registry {
+		if kg.GameID == gameID {
+			return kg.DisplayName
+		}
+	}
+	return gameID
 }

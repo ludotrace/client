@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/getlantern/systray"
 	"github.com/ludotrace/client/internal/auth"
@@ -52,12 +53,26 @@ type Tray struct {
 	updateCh          chan updateNote
 	pendingRestartFn  func(pendingPath string)
 	pendingUpdatePath string
+
+	addGameFn       func()
+	addedCh         chan gameAddedNote
+	addGameInFlight atomic.Bool
 }
 
 type updateNote struct {
 	version     string
 	pendingPath string
 	restartFn   func(pendingPath string) // called when "Restart to Update" is clicked
+}
+
+// gameAddedNote carries the outcome of an Add Game action back to the tray
+// loop goroutine, which is the only place allowed to make systray calls.
+// info and err are mutually exclusive: info is a benign, non-failure
+// message (e.g. "already added") shown without the "failed" framing.
+type gameAddedNote struct {
+	gameName string
+	err      error
+	info     string
 }
 
 // SetHasGames records whether any games are configured, so the sign-in handler
@@ -76,7 +91,45 @@ func New(a auth.Client, q *queue.Queue, coreURL, appURL, version string) *Tray {
 		stateCh:  make(chan State, 8),
 		updateCh: make(chan updateNote, 1),
 		retryCh:  make(chan struct{}, 1),
+		addedCh:  make(chan gameAddedNote, 1),
 	}
+}
+
+// SetAddGameHandler injects the callback invoked when the user clicks
+// "Add Game" (either menu variant). The handler runs discovery, the file
+// picker, config write, and watcher registration — composed in main.go, not
+// here, since this package must stay ignorant of steam/config/watcher
+// wiring. It is invoked on its own goroutine so the (potentially blocking,
+// native-dialog-driven) handler never stalls the tray's click loop; the
+// handler should call NotifyGameAdded when it completes to surface the
+// result.
+func (t *Tray) SetAddGameHandler(fn func()) {
+	t.addGameFn = fn
+}
+
+// NotifyGameAdded surfaces the outcome of an Add Game action in the tray
+// menu: a success confirmation naming the game, or a failure message.
+// Non-blocking and safe from any goroutine, matching NotifyUpdateReady's
+// shape — a pending note is replaced by the newest one, and the actual
+// systray call happens on the tray loop goroutine (addedLoop).
+func (t *Tray) NotifyGameAdded(gameName string, err error) {
+	select {
+	case <-t.addedCh:
+	default:
+	}
+	t.addedCh <- gameAddedNote{gameName: gameName, err: err}
+}
+
+// NotifyGameInfo surfaces a benign, non-error outcome of an Add Game action
+// (e.g. the picked folder resolved to a game already configured) — shown
+// as-is, without the "Add Game failed" framing NotifyGameAdded uses for
+// errors. Same non-blocking, latest-wins semantics as NotifyGameAdded.
+func (t *Tray) NotifyGameInfo(msg string) {
+	select {
+	case <-t.addedCh:
+	default:
+	}
+	t.addedCh <- gameAddedNote{info: msg}
 }
 
 // NotifyUpdateReady surfaces the "Restart to Update" tray item.
@@ -165,6 +218,11 @@ type menuItems struct {
 	// Update notification — shown when a staged update is waiting.
 	updateLabel   *systray.MenuItem
 	restartUpdate *systray.MenuItem
+
+	// Add Game confirmation/failure — shown after an Add Game action
+	// completes. Like updateLabel, not part of hideAll: it's an overlay
+	// notification independent of the current State, not a per-state item.
+	gameAdded *systray.MenuItem
 }
 
 func buildMenu() *menuItems {
@@ -202,6 +260,10 @@ func buildMenu() *menuItems {
 	m.updateLabel.Hide()
 	m.restartUpdate.Hide()
 
+	m.gameAdded = systray.AddMenuItem("", "")
+	m.gameAdded.Disable()
+	m.gameAdded.Hide()
+
 	return m
 }
 
@@ -218,6 +280,7 @@ func (t *Tray) onReady() {
 
 	go t.stateLoop(m)
 	go t.updateLoop(m)
+	go t.addedLoop(m)
 	go t.clickLoop(m)
 }
 
@@ -237,6 +300,20 @@ func (t *Tray) updateLoop(m *menuItems) {
 		// Store the restart function so clickLoop can invoke it.
 		t.pendingRestartFn = note.restartFn
 		t.pendingUpdatePath = note.pendingPath
+	}
+}
+
+func (t *Tray) addedLoop(m *menuItems) {
+	for note := range t.addedCh {
+		switch {
+		case note.info != "":
+			m.gameAdded.SetTitle(note.info)
+		case note.err != nil:
+			m.gameAdded.SetTitle(fmt.Sprintf("Add Game failed: %s", note.err))
+		default:
+			m.gameAdded.SetTitle(fmt.Sprintf("Added: %s", note.gameName))
+		}
+		m.gameAdded.Show()
 	}
 }
 
@@ -358,10 +435,10 @@ func (t *Tray) clickLoop(m *menuItems) {
 			}()
 
 		case <-m.addGame.ClickedCh:
-			slog.Info("Add Game clicked — dialog not yet implemented")
+			t.triggerAddGame()
 
 		case <-m.addGameNG.ClickedCh:
-			slog.Info("Add Game clicked — dialog not yet implemented")
+			t.triggerAddGame()
 
 		case <-m.manageGames.ClickedCh:
 			go func() {
@@ -415,6 +492,29 @@ func (t *Tray) clickLoop(m *menuItems) {
 			systray.Quit()
 		}
 	}
+}
+
+// triggerAddGame runs the injected Add Game handler on its own goroutine so
+// a blocking native file-dialog call never stalls clickLoop (and, by
+// extension, every other menu item).
+//
+// addGameInFlight guards against a double-click (or one click on each of
+// the two "Add Game" menu variants) spawning two concurrent handler runs —
+// without this, the second call would block silently behind the handler's
+// own gamesMu, stuck behind a native dialog with no feedback that the click
+// registered at all.
+func (t *Tray) triggerAddGame() {
+	if t.addGameFn == nil {
+		slog.Warn("add game clicked but no handler registered")
+		return
+	}
+	if !t.addGameInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer t.addGameInFlight.Store(false)
+		t.addGameFn()
+	}()
 }
 
 func openBrowser(target string) error {
