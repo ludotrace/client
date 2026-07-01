@@ -46,6 +46,31 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
+	// Resolve + create the config dir early so logging can be teed into a file
+	// there before any other work runs. A GUI-subsystem Windows build
+	// (-H=windowsgui, see Makefile) has no console, so stderr goes nowhere on a
+	// user's machine — ludotrace.log is the only post-hoc diagnostic. stderr is
+	// kept alongside it for console/dev runs.
+	cfgDir, err := config.Dir()
+	if err != nil {
+		slog.Error("failed to resolve config dir", "err", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		slog.Error("failed to create config dir", "err", err)
+		os.Exit(1)
+	}
+	if f := openLogFile(cfgDir); f != nil {
+		// Tee tolerantly, not via io.MultiWriter: a GUI-subsystem build
+		// (-H=windowsgui) has an invalid os.Stderr, and io.MultiWriter aborts
+		// on the first writer's error — which would leave the log file empty,
+		// silently defeating the whole point. tolerantTee writes to every
+		// writer regardless, so a dead stderr can't suppress the file.
+		w := &tolerantTee{writers: []io.Writer{os.Stderr, f}}
+		slog.SetDefault(slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})))
+		// f is intentionally left open for the lifetime of the process.
+	}
+
 	// --check-update: one-shot. Runs the same Check+Stage path as the
 	// background worker, logs the outcome, and exits. Does not take the
 	// singleton lock or start the tray, so it can run alongside a live
@@ -57,16 +82,6 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "err", err)
-		os.Exit(1)
-	}
-
-	cfgDir, err := config.Dir()
-	if err != nil {
-		slog.Error("failed to resolve config dir", "err", err)
-		os.Exit(1)
-	}
-	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
-		slog.Error("failed to create config dir", "err", err)
 		os.Exit(1)
 	}
 
@@ -188,6 +203,44 @@ func main() {
 	)
 	t.Run() // blocks until Quit() or systray exit
 	stop()
+}
+
+// tolerantTee fans each log record out to every writer, ignoring individual
+// write errors so one dead writer never suppresses the others. This exists
+// specifically because os.Stderr is an invalid handle under a -H=windowsgui
+// build: io.MultiWriter would abort the whole write on stderr's error and
+// never reach the log file. Always reports success, which slog treats as a
+// clean write.
+type tolerantTee struct{ writers []io.Writer }
+
+func (t *tolerantTee) Write(p []byte) (int, error) {
+	for _, w := range t.writers {
+		_, _ = w.Write(p)
+	}
+	return len(p), nil
+}
+
+// maxLogBytes caps ludotrace.log before a single-generation rotation, so the
+// always-on daemon never grows it unbounded.
+const maxLogBytes = 5 << 20 // 5 MiB
+
+// openLogFile opens (creating, appending to) ludotrace.log in cfgDir, rotating
+// a prior log aside to ludotrace.log.old once it exceeds maxLogBytes. Returns
+// nil on failure, in which case the caller keeps logging to stderr only — a
+// missing log file must never stop the daemon from starting.
+func openLogFile(cfgDir string) *os.File {
+	logPath := filepath.Join(cfgDir, "ludotrace.log")
+	if fi, err := os.Stat(logPath); err == nil && fi.Size() > maxLogBytes {
+		// Best-effort rotation; on Windows a locked .old just means we keep
+		// appending to the existing file, which is acceptable.
+		_ = os.Rename(logPath, logPath+".old")
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		slog.Warn("could not open log file; logging to stderr only", "path", logPath, "err", err)
+		return nil
+	}
+	return f
 }
 
 // runUpdateWorker checks for a newer version on startup then on a
@@ -531,9 +584,9 @@ func makeAddGameHandler(gamesMu *sync.Mutex, cfg *config.Config, q *queue.Queue,
 		if err != nil {
 			var aa *alreadyAddedError
 			if errors.As(err, &aa) {
-				t.NotifyGameInfo(aa.Error())
+				notifyGameInfo(aa.Error())
 			} else {
-				t.NotifyGameAdded("", err)
+				notifyGameError(err)
 			}
 			return
 		}
@@ -548,35 +601,35 @@ func makeAddGameHandler(gamesMu *sync.Mutex, cfg *config.Config, q *queue.Queue,
 		offsetPath, err := config.OffsetPath(g.GameID)
 		if err != nil {
 			slog.Error("add game: failed to resolve offset path", "game_id", g.GameID, "err", err)
-			t.NotifyGameAdded("", fmt.Errorf("could not resolve offset path for %q: %w", g.GameID, err))
+			notifyGameError(fmt.Errorf("could not resolve offset path for %q: %w", g.GameID, err))
 			return
 		}
 		extractors.set(g.GameID, session.New(g.GameID, eventsPath, offsetPath, os.TempDir(), q))
 
 		if err := w.AddGame(*g); err != nil {
 			slog.Warn("add game: watcher registration failed", "game_id", g.GameID, "err", err)
-			t.NotifyGameAdded("", fmt.Errorf("could not watch %q: %w", g.WatchPath, err))
+			notifyGameError(fmt.Errorf("could not watch %q: %w", g.WatchPath, err))
 			return
 		}
 
 		if err := config.AppendGame(*g); err != nil {
 			slog.Error("add game: failed to write config", "game_id", g.GameID, "err", err)
-			t.NotifyGameAdded("", err)
+			notifyGameError(err)
 			return
 		}
 		cfg.Games = append(cfg.Games, *g)
 
 		t.SetHasGames(true)
 		t.SetState(tray.StateIdle)
-		t.NotifyGameAdded(displayName(g.GameID), nil)
 
 		slog.Info("game added", "game_id", g.GameID, "watch_path", g.WatchPath)
+		notifyGameAdded(displayName(g.GameID))
 	}
 }
 
 // alreadyAddedError signals a benign "nothing to do" outcome: the picked
 // folder resolved to a game_id already present in cfg.Games. Not a failure
-// — the caller surfaces it via NotifyGameInfo, not NotifyGameAdded's error
+// — the caller surfaces it via notifyGameInfo, not notifyGameError's error
 // framing.
 type alreadyAddedError struct {
 	displayName string
@@ -584,6 +637,27 @@ type alreadyAddedError struct {
 
 func (e *alreadyAddedError) Error() string {
 	return fmt.Sprintf("%s is already added", e.displayName)
+}
+
+// notifyGameAdded/notifyGameInfo/notifyGameError surface the outcome of an
+// Add Game action as a native modal dialog. The tray menu closes the instant
+// its item is clicked, so a menu-item title is never seen in the moment — a
+// modal is the only feedback a non-technical user reliably notices, and the
+// picker already proves native dialogs work from this handler goroutine.
+// These run on the (already off-tray-loop) handler goroutine and block until
+// dismissed, which harmlessly keeps triggerAddGame's in-flight guard set so a
+// second click can't start a parallel run behind the dialog.
+func notifyGameAdded(gameName string) {
+	dialog.Message("%s was added and is now being tracked.", gameName).
+		Title("LudoTrace — Game Added").Info()
+}
+
+func notifyGameInfo(msg string) {
+	dialog.Message("%s", msg).Title("LudoTrace — Add Game").Info()
+}
+
+func notifyGameError(err error) {
+	dialog.Message("Add Game failed:\n\n%s", err).Title("LudoTrace — Add Game").Error()
 }
 
 // resolveNewGame runs the two-stage Add Game flow and returns the game to
