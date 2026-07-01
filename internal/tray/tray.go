@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/getlantern/systray"
 	"github.com/ludotrace/client/internal/auth"
@@ -52,6 +53,9 @@ type Tray struct {
 	updateCh          chan updateNote
 	pendingRestartFn  func(pendingPath string)
 	pendingUpdatePath string
+
+	addGameFn       func()
+	addGameInFlight atomic.Bool
 }
 
 type updateNote struct {
@@ -77,6 +81,18 @@ func New(a auth.Client, q *queue.Queue, coreURL, appURL, version string) *Tray {
 		updateCh: make(chan updateNote, 1),
 		retryCh:  make(chan struct{}, 1),
 	}
+}
+
+// SetAddGameHandler injects the callback invoked when the user clicks
+// "Add Game" (either menu variant). The handler runs discovery, the file
+// picker, config write, and watcher registration — composed in main.go, not
+// here, since this package must stay ignorant of steam/config/watcher
+// wiring. It is invoked on its own goroutine so the (potentially blocking,
+// native-dialog-driven) handler never stalls the tray's click loop; the
+// handler surfaces its own outcome via a native modal dialog (see main.go),
+// so the tray does not carry any Add Game result state.
+func (t *Tray) SetAddGameHandler(fn func()) {
+	t.addGameFn = fn
 }
 
 // NotifyUpdateReady surfaces the "Restart to Update" tray item.
@@ -358,10 +374,10 @@ func (t *Tray) clickLoop(m *menuItems) {
 			}()
 
 		case <-m.addGame.ClickedCh:
-			slog.Info("Add Game clicked — dialog not yet implemented")
+			t.triggerAddGame()
 
 		case <-m.addGameNG.ClickedCh:
-			slog.Info("Add Game clicked — dialog not yet implemented")
+			t.triggerAddGame()
 
 		case <-m.manageGames.ClickedCh:
 			go func() {
@@ -415,6 +431,29 @@ func (t *Tray) clickLoop(m *menuItems) {
 			systray.Quit()
 		}
 	}
+}
+
+// triggerAddGame runs the injected Add Game handler on its own goroutine so
+// a blocking native file-dialog call never stalls clickLoop (and, by
+// extension, every other menu item).
+//
+// addGameInFlight guards against a double-click (or one click on each of
+// the two "Add Game" menu variants) spawning two concurrent handler runs —
+// without this, the second call would block silently behind the handler's
+// own gamesMu, stuck behind a native dialog with no feedback that the click
+// registered at all.
+func (t *Tray) triggerAddGame() {
+	if t.addGameFn == nil {
+		slog.Warn("add game clicked but no handler registered")
+		return
+	}
+	if !t.addGameInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer t.addGameInFlight.Store(false)
+		t.addGameFn()
+	}()
 }
 
 func openBrowser(target string) error {
