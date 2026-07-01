@@ -17,6 +17,7 @@ import (
 	"github.com/ludotrace/client/internal/autostart"
 	"github.com/ludotrace/client/internal/config"
 	"github.com/ludotrace/client/internal/keychain"
+	"github.com/ludotrace/client/internal/lock"
 	"github.com/ludotrace/client/internal/queue"
 	"github.com/ludotrace/client/internal/session"
 	"github.com/ludotrace/client/internal/tray"
@@ -70,13 +71,12 @@ func main() {
 		slog.Error("failed to resolve lock path", "err", err)
 		os.Exit(1)
 	}
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL, 0o600)
+	instanceLock, err := lock.Acquire(lockPath)
 	if err != nil {
-		slog.Error("another instance is already running", "lock", lockPath)
+		slog.Error("another instance is already running", "lock", lockPath, "err", err)
 		os.Exit(1)
 	}
-	lockFile.Close()
-	defer os.Remove(lockPath)
+	defer instanceLock.Release()
 
 	autostart.Register()
 
