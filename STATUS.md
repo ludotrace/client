@@ -9,7 +9,7 @@ Cross-referenced against code in this repo and `internal/features.md`.
 
 Confirmed working via manual end-to-end test or observed in production.
 
-- **Singleton lock** — `cmd/ludotrace/main.go:54`: `O_CREATE|O_EXCL` on `ludotrace.lock`; exits cleanly if lock is held.
+- **Singleton lock** — `internal/lock/lock.go`: `O_CREATE|O_EXCL` on `ludotrace.lock`, PID written into the file. On contention, reads the existing PID and checks liveness (`lock_windows.go`: `OpenProcess`+`GetExitCodeProcess`; `lock_unix.go`: `Signal(0)`); a lock left by a killed/crashed process (dead PID, or empty/unparseable — the pre-fix format) is reclaimed automatically instead of blocking forever. A lock held by a live process still returns `ErrHeld`. Fixes #26, where a non-graceful exit permanently wedged both manual relaunch and Windows autostart. Unit-tested (`lock_test.go`, 4/4: acquire/release, live-PID rejection, dead-PID reclaim, empty-file reclaim).
 - **Config load + validation** — `internal/config/config.go:Load()`: TOML parse, URL validation, `filterGames` skips missing watch paths with WARN, `LUDOTRACE_CORE_URL` / `LUDOTRACE_APP_URL` env overrides applied.
 - **File watcher (fsnotify, 2 s debounce)** — `internal/watcher/watcher.go`: watches WRITE+CREATE events; if events file absent at startup, watches parent directory and promotes to file watch on CREATE (`watcher.go:52-65`). Debounce timer reset on burst (`watcher.go:149-150`).
 - **Startup extraction** — `internal/watcher/watcher.go:Start()`: immediately triggers `cb(gameID)` for each game whose events file exists before entering the event loop (`watcher.go:74-78`).
