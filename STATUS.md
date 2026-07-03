@@ -1,7 +1,7 @@
 # Client STATUS
 
 What is actually built, validated, or just designed. Not a spec or wish list.
-Cross-referenced against code in this repo and `internal/features.md`.
+Cross-referenced against code in this repo.
 
 ---
 
@@ -48,4 +48,4 @@ Code exists and is wired up; not confirmed working under real conditions.
 
 Appears in `CLAUDE.md` design notes or tracked design docs; no implementation exists.
 
-- **Cloudflare Access service token on client requests** — `internal/features.md` Security section: add `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers to all client HTTP requests to Core. No header injection present in `internal/uploader/uploader.go` or `internal/auth/auth.go`.
+- **Cloudflare Access service token on client requests** — add `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers to all client HTTP requests to Core. No header injection present in `internal/uploader/uploader.go` or `internal/auth/auth.go`. Infra/ops item tracked in `internal/STATUS.md`, not a design decision (architecture spine Deferred).
