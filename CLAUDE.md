@@ -84,16 +84,22 @@ events_file = "lt_stardew_events.jsonl"
 
 ## Auth Flow
 
+The Client never calls Clerk directly — Core proxies the entire OAuth flow. This is a
+deliberate boundary (architecture spine AD-3): exactly two credential paths exist system-wide,
+and this is the machine/headless one.
+
 ```
-1. Client checks OS keychain for valid token
+1. Client checks OS keychain for a valid opaque token
 2. If no token or expired:
-   a. Open system browser to Clerk OAuth URL
-   b. Start localhost HTTP server on random port
-   c. Clerk redirects to localhost callback with auth code
-   d. Exchange code for token
-   e. Store token in OS keychain
-3. Use token for all Core API requests
-4. Refresh token automatically before expiry
+   a. Open system browser to Core's GET /auth/signin
+   b. Start localhost HTTP server (loopback listener) on a random port
+   c. Core handles the Clerk OAuth exchange, then redirects to the loopback
+      listener with an opaque token (Core-issued, not a Clerk token)
+   d. Store the opaque token in OS keychain
+3. On each upload, exchange the opaque token for a short-lived Core-signed JWT
+   via POST /v1/auth/token (HS256, 60s lifetime, issuer ludotrace-core)
+4. Use the JWT as Authorization: Bearer on that request; repeat step 3 per upload
+   rather than caching the JWT past its lifetime
 ```
 
 ```go
