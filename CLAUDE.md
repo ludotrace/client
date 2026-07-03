@@ -6,7 +6,7 @@ LudoTrace Client is a lightweight background daemon that watches a game's append
 
 It is intentionally dumb. No UI beyond a system tray icon. No LLM calls. Watch events file → extract sessions → authenticate → compress → upload → advance offset. Session boundary detection is the only logic it owns.
 
-Reference the overarching architecture at `ludotrace/internal/ARCHITECTURE.md` for vision, data flow, and stack decisions.
+Reference the PRD (`ludotrace/internal/_bmad-output/planning-artifacts/prds/`) for vision and the architecture spine (`ludotrace/internal/_bmad-output/planning-artifacts/architecture/architecture-ludotrace-2026-07-02/ARCHITECTURE-SPINE.md`) for data flow and stack decisions.
 
 ---
 
@@ -232,11 +232,10 @@ build-all: build-mac build-windows build-linux
 
 ## MVP Scope
 
-For MVP the following are out of scope:
-- Auto-update mechanism
-- Installer / setup wizard
-- Multiple accounts
-- Manual upload UI
-- Session history in tray
+Out of scope: installer / setup wizard, multiple accounts, manual upload UI, session history in tray. (Auto-update shipped `v0.1.0` — see `STATUS.md`, no longer out of scope.)
 
 Ship the watcher. Ship the upload. Ship the tray icon. Validate the end-to-end flow works for one user (you) before adding anything else.
+
+## Issues & PRs
+
+GitHub, single remote (`github.com/ludotrace/client`). Issues and PRs both via `gh` (`gh issue create/list`, `gh pr create`) — pass `--repo ludotrace/client` if running outside a clone.
