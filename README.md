@@ -41,6 +41,23 @@ events_file = "lt_fo4_events.jsonl"
 
 Run `ludotrace.exe` — it appears in the system tray. Click **Sign In** to authenticate.
 
+### Unsigned binary warnings
+
+Release binaries are **not code-signed**. Your OS will warn you before running them — this is expected, not a sign of malware. Code signing is on the roadmap (see [#18](https://github.com/ludotrace/client/issues/18)).
+
+**Windows (SmartScreen):**
+
+1. You'll see "Windows protected your PC".
+2. Click **More info**.
+3. Click **Run anyway**.
+
+**macOS (Gatekeeper):**
+
+Either:
+
+- Right-click (or Control-click) the binary → **Open** → confirm **Open** in the dialog, or
+- Run in Terminal: `xattr -d com.apple.quarantine ./ludotrace-mac-*`
+
 ---
 
 ## Build
