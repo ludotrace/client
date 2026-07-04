@@ -232,29 +232,10 @@ func (t *Tray) onReady() {
 	// Render initial state before any SetState call arrives.
 	t.applyState(StateIdle, m)
 
-	go t.stateLoop(m)
-	go t.updateLoop(m)
-	go t.clickLoop(m)
+	go t.eventLoop(m)
 }
 
 func (t *Tray) onExit() {}
-
-func (t *Tray) stateLoop(m *menuItems) {
-	for s := range t.stateCh {
-		t.applyState(s, m)
-	}
-}
-
-func (t *Tray) updateLoop(m *menuItems) {
-	for note := range t.updateCh {
-		m.updateLabel.SetTitle(fmt.Sprintf("Update %s ready", note.version))
-		m.updateLabel.Show()
-		m.restartUpdate.Show()
-		// Store the restart function so clickLoop can invoke it.
-		t.pendingRestartFn = note.restartFn
-		t.pendingUpdatePath = note.pendingPath
-	}
-}
 
 func (t *Tray) applyState(s State, m *menuItems) {
 	hideAll(m)
@@ -331,9 +312,25 @@ func hideAll(m *menuItems) {
 	m.quitNG.Hide()
 }
 
-func (t *Tray) clickLoop(m *menuItems) {
+// eventLoop is the tray's single event goroutine: state changes, update
+// notifications, and menu clicks all funnel through one select rather than
+// three separate always-blocked goroutines — cuts idle goroutine count
+// without changing behavior, since each source was already independent and
+// non-blocking apart from its own handler.
+func (t *Tray) eventLoop(m *menuItems) {
 	for {
 		select {
+		case s := <-t.stateCh:
+			t.applyState(s, m)
+
+		case note := <-t.updateCh:
+			m.updateLabel.SetTitle(fmt.Sprintf("Update %s ready", note.version))
+			m.updateLabel.Show()
+			m.restartUpdate.Show()
+			// Store the restart function so the click case below can invoke it.
+			t.pendingRestartFn = note.restartFn
+			t.pendingUpdatePath = note.pendingPath
+
 		case <-m.signIn.ClickedCh:
 			go func() {
 				err := t.auth.SignIn(context.Background())
@@ -434,7 +431,7 @@ func (t *Tray) clickLoop(m *menuItems) {
 }
 
 // triggerAddGame runs the injected Add Game handler on its own goroutine so
-// a blocking native file-dialog call never stalls clickLoop (and, by
+// a blocking native file-dialog call never stalls eventLoop (and, by
 // extension, every other menu item).
 //
 // addGameInFlight guards against a double-click (or one click on each of
