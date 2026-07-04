@@ -40,12 +40,10 @@ build-linux:
 
 build-all: build-mac build-mac-arm build-windows build-linux
 
+# Requires CGo + GTK deps (see build-linux comment) — cmd/ludotrace and
+# internal/tray both link systray/dialog.
 test:
-	go test -race $(shell go list ./internal/... | grep -v '/tray')
-
-# Requires CGo + GTK deps (see build-linux comment)
-test-tray:
-	go test -race ./internal/tray/...
+	go test -race ./...
 
 lint:
 	go vet ./...
