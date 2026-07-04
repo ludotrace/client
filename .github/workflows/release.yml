@@ -22,7 +22,7 @@ jobs:
           - os: macos-latest
             name: macos
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -93,7 +93,7 @@ jobs:
           path: dist/
 
       - name: Checkout site repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ludotrace/ludotrace.github.io
           token: ${{ secrets.SITE_DEPLOY_TOKEN }}
