@@ -10,6 +10,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,9 +153,16 @@ func (c *authClient) GetToken(ctx context.Context) (string, error) {
 // SignIn starts the browser-based sign-in flow.
 //
 //  1. Binds to 127.0.0.1:{ephemeral port} for the OAuth redirect callback.
-//  2. Opens the system browser to {coreURL}/auth/signin?redirect_uri=...
-//  3. Core handles the Clerk flow and redirects back with ?token=<opaque>.
+//  2. Opens the system browser to {coreURL}/auth/signin?redirect_uri=...&state=...
+//  3. Core handles the Clerk flow and redirects back with ?token=<opaque>&state=<nonce>.
 //  4. Stores the opaque token in the keychain.
+//
+// state is a fresh random nonce per call, verified against what the callback
+// receives before any token is accepted (RFC 6749 §10.12). Without it, the
+// ephemeral loopback port is the only thing separating "signed in as
+// yourself" from "signed in as whoever's crafted redirect reached this
+// listener first" — and the port space is small enough to be scanned within
+// signInTimeout.
 func (c *authClient) SignIn(ctx context.Context) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -162,11 +171,25 @@ func (c *authClient) SignIn(ctx context.Context) error {
 	port := ln.Addr().(*net.TCPAddr).Port
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
+	state, err := generateState()
+	if err != nil {
+		return fmt.Errorf("auth: generate state: %w", err)
+	}
+
 	tokenCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintln(w, "Sign-in failed: state mismatch.")
+			select {
+			case errCh <- fmt.Errorf("auth: callback state mismatch"):
+			default:
+			}
+			return
+		}
 		token := r.URL.Query().Get("token")
 		if token == "" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -189,7 +212,7 @@ func (c *authClient) SignIn(ctx context.Context) error {
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
 
-	signInURL := c.coreURL + "/auth/signin?redirect_uri=" + url.QueryEscape(redirectURI)
+	signInURL := c.coreURL + "/auth/signin?redirect_uri=" + url.QueryEscape(redirectURI) + "&state=" + url.QueryEscape(state)
 	if err := openBrowser(signInURL); err != nil {
 		return fmt.Errorf("auth: open browser: %w", err)
 	}
@@ -229,6 +252,16 @@ func (c *authClient) SignIn(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// generateState returns a cryptographically random hex nonce for the OAuth
+// state parameter.
+func generateState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("rand read: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // SignOut clears local state and best-effort revokes the opaque token on Core.

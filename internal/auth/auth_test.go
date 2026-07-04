@@ -171,6 +171,23 @@ func TestGetToken_NoOpaqueToken_ErrNotSignedIn(t *testing.T) {
 	}
 }
 
+func TestGenerateState_UniqueAndNonEmpty(t *testing.T) {
+	a, err := generateState()
+	if err != nil {
+		t.Fatalf("generateState: %v", err)
+	}
+	b, err := generateState()
+	if err != nil {
+		t.Fatalf("generateState: %v", err)
+	}
+	if a == "" || b == "" {
+		t.Fatal("expected non-empty state values")
+	}
+	if a == b {
+		t.Fatal("expected distinct state values across calls")
+	}
+}
+
 func TestIsSignedIn(t *testing.T) {
 	c, srv := newClientWithToken(t, func(w http.ResponseWriter, r *http.Request) {}, "opaque-tok")
 	defer srv.Close()
