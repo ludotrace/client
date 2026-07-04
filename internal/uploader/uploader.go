@@ -29,6 +29,8 @@ func (e ErrBadRequest) Error() string {
 	return fmt.Sprintf("uploader: bad request (400): %s", e.Reason)
 }
 
+var httpClient = &http.Client{Timeout: 120 * time.Second}
+
 type uploadResponse struct {
 	JobID string `json:"job_id"`
 }
@@ -136,7 +138,7 @@ func doUpload(ctx context.Context, coreURL, gameID, filePath, token string) (str
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
