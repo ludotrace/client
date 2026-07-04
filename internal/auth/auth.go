@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ludotrace/client/internal/browser"
 	"github.com/ludotrace/client/internal/keychain"
 )
 
@@ -213,7 +214,12 @@ func (c *authClient) SignIn(ctx context.Context) error {
 	defer srv.Close()
 
 	signInURL := c.coreURL + "/auth/signin?redirect_uri=" + url.QueryEscape(redirectURI) + "&state=" + url.QueryEscape(state)
-	if err := openBrowser(signInURL); err != nil {
+	// Log the exact URL we hand to the OS. openBrowser succeeds as soon as the
+	// launcher process starts, so a mangled URL (e.g. the old Windows cmd.exe
+	// "&" truncation that dropped the state param) leaves no other trace — this
+	// line is the only signal of what was actually requested.
+	slog.Info("auth: opening sign-in URL", "url", signInURL)
+	if err := browser.Open(signInURL); err != nil {
 		return fmt.Errorf("auth: open browser: %w", err)
 	}
 
