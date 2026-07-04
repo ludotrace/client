@@ -6,12 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
-	"runtime"
 	"sync/atomic"
 
 	"github.com/getlantern/systray"
 	"github.com/ludotrace/client/internal/auth"
+	"github.com/ludotrace/client/internal/browser"
 	"github.com/ludotrace/client/internal/config"
 	"github.com/ludotrace/client/internal/queue"
 )
@@ -454,14 +453,5 @@ func (t *Tray) triggerAddGame() {
 }
 
 func openBrowser(target string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", target)
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", target)
-	default:
-		cmd = exec.Command("xdg-open", target)
-	}
-	return cmd.Start()
+	return browser.Open(target)
 }
