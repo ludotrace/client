@@ -413,6 +413,32 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors *extractorStore, t *tray.Tray) {
 	var backoff uploadBackoff
 	retryCh := t.RetryCh()
+
+	// A single reusable timer for all backoff/retry delays in this loop,
+	// rather than a fresh time.After per branch — under rapid repeated
+	// errors those would otherwise accumulate in the runtime timer heap
+	// until each one fires.
+	timer := time.NewTimer(0)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
+	// wait blocks for d, or until ctx is cancelled. Returns false if the
+	// caller should return (ctx cancelled).
+	wait := func(d time.Duration) bool {
+		timer.Reset(d)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -421,10 +447,8 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		}
 
 		if q.Len() == 0 {
-			select {
-			case <-ctx.Done():
+			if !wait(5 * time.Second) {
 				return
-			case <-time.After(5 * time.Second):
 			}
 			continue
 		}
@@ -438,18 +462,14 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if err != nil {
 			if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, auth.ErrTokenRevoked) {
 				t.SetState(tray.StateNotAuth)
-				select {
-				case <-ctx.Done():
+				if !wait(10 * time.Second) {
 					return
-				case <-time.After(10 * time.Second):
 				}
 				continue
 			}
 			slog.Warn("failed to get auth token", "err", err)
-			select {
-			case <-ctx.Done():
+			if !wait(5 * time.Second) {
 				return
-			case <-time.After(5 * time.Second):
 			}
 			continue
 		}
@@ -478,10 +498,8 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if errors.Is(err, uploader.ErrUnauthorized) {
 			t.SetState(tray.StateNotAuth)
 			_, _ = authClient.GetToken(ctx)
-			select {
-			case <-ctx.Done():
+			if !wait(2 * time.Second) {
 				return
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
@@ -489,10 +507,8 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if errors.Is(err, uploader.ErrLimitReached) {
 			t.SetState(tray.StateLimitReached)
 			_ = q.UpdateAttempts(item.TmpPath)
-			select {
-			case <-ctx.Done():
+			if !wait(60 * time.Second) {
 				return
-			case <-time.After(60 * time.Second):
 			}
 			continue
 		}
@@ -511,11 +527,18 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		_ = q.UpdateAttempts(item.TmpPath)
 		delay := backoff.next()
 		t.SetQueued(queuedMessage(q.Len(), delay))
+		timer.Reset(delay)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return
-		case <-time.After(delay):
+		case <-timer.C:
 		case <-retryCh:
+			if !timer.Stop() {
+				<-timer.C
+			}
 			slog.Info("retry requested — resetting backoff")
 			backoff.reset()
 		}
