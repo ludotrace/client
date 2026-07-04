@@ -26,7 +26,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make build-windows
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ludotrace-windows
           path: dist/ludotrace.exe
