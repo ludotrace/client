@@ -25,6 +25,7 @@ import (
 	"github.com/ludotrace/client/internal/lock"
 	"github.com/ludotrace/client/internal/queue"
 	"github.com/ludotrace/client/internal/session"
+	"github.com/ludotrace/client/internal/splash"
 	"github.com/ludotrace/client/internal/steam"
 	"github.com/ludotrace/client/internal/tray"
 	"github.com/ludotrace/client/internal/updater"
@@ -81,6 +82,16 @@ func main() {
 		os.Exit(runCheckUpdate())
 	}
 
+	// Flash the launch splash on an interactive (double-click) launch. A
+	// -H=windowsgui build gives zero feedback on double-click (#51), so this is
+	// the only "it started" signal a user gets. It is fired here — before the
+	// singleton lock — deliberately: a repeat double-click that will exit early
+	// on ErrHeld must still flash, so the user isn't left thinking nothing
+	// happened. Non-interactive launches (--autostart on login, --finish-update
+	// / --check-update one-shots, or any other args) are suppressed by
+	// DecideLaunch. Show is non-blocking and never fails the caller.
+	splashHandle := splash.Show(splash.DecideLaunch(os.Args))
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "err", err)
@@ -95,6 +106,10 @@ func main() {
 	instanceLock, err := lock.Acquire(lockPath)
 	if err != nil {
 		slog.Error("another instance is already running", "lock", lockPath, "err", err)
+		// Let the launch splash finish before exiting so a repeat double-click
+		// still produces visible feedback instead of silently vanishing. Wait
+		// returns immediately on a suppressed/non-Windows launch.
+		splashHandle.Wait()
 		os.Exit(1)
 	}
 	defer instanceLock.Release()
