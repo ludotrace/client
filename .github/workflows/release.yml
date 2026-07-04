@@ -130,11 +130,17 @@ jobs:
           }
           EOF
 
+      - name: Stamp download version into site page
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          sed -i -E 's#(<p class="download-version">)[^<]*(</p>)#\1'"${VERSION}"'\2#' site/index.html
+
       - name: Commit and push site
         working-directory: site
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/ client/version.json
+          git add downloads/ client/version.json index.html
           git commit -m "release: client ${{ github.ref_name }}"
           git push
