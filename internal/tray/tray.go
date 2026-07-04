@@ -45,6 +45,7 @@ type Tray struct {
 	hasGames      bool
 	stateCh       chan State
 	errorMsg      string
+	signInErr     string
 	queuedMsg     string
 	uploadingGame string
 	retryCh       chan struct{}
@@ -127,6 +128,17 @@ func (t *Tray) SetState(s State) {
 func (t *Tray) SetError(msg string) {
 	t.errorMsg = msg
 	t.SetState(StateError)
+}
+
+// SetSignInFailed surfaces a failed or timed-out sign-in attempt and returns
+// the tray to StateNotAuth (Sign In / Quit only), with the reason on the
+// status line. Distinct from SetError: StateError renders the full
+// authenticated menu, which assumes a signed-in user — wrong for a sign-in
+// that never succeeded. Sign In is only reachable from StateNotAuth, so a
+// failure always returns there.
+func (t *Tray) SetSignInFailed(msg string) {
+	t.signInErr = msg
+	t.SetState(StateNotAuth)
 }
 
 // SetQueued sets the queued status line (e.g. "2 sessions queued — retrying in
@@ -268,6 +280,11 @@ func (t *Tray) applyState(s State, m *menuItems) {
 		m.retryNow.Show()
 
 	case StateNotAuth:
+		if t.signInErr != "" {
+			systray.SetIcon(iconError)
+			m.statusLine.SetTitle(fmt.Sprintf("Sign-in failed: %s", t.signInErr))
+			m.statusLine.Show()
+		}
 		m.signIn.Show()
 		m.quitNA.Show()
 
@@ -332,6 +349,9 @@ func (t *Tray) eventLoop(m *menuItems) {
 
 		case <-m.signIn.ClickedCh:
 			go func() {
+				// Clear any reason left from a prior failed attempt so it
+				// can't leak into a later StateNotAuth (e.g. after Sign Out).
+				t.signInErr = ""
 				err := t.auth.SignIn(context.Background())
 				switch {
 				case err == nil:
@@ -346,8 +366,11 @@ func (t *Tray) eventLoop(m *menuItems) {
 					t.SetError("Signed in, but couldn't save credentials — you may need to sign in again after restart (Windows Credential Manager may be full).")
 					return
 				default:
-					// Sign-in itself failed.
-					t.SetError(err.Error())
+					// Sign-in itself failed (error, timeout, or ctx
+					// cancellation). No session exists, so return to
+					// StateNotAuth with the reason — never the
+					// authenticated menu that StateError would render.
+					t.SetSignInFailed(err.Error())
 					return
 				}
 				if t.hasGames {
