@@ -6,8 +6,6 @@ LudoTrace Client is a lightweight background daemon that watches a game's append
 
 It is intentionally dumb. No UI beyond a system tray icon. No LLM calls. Watch events file → extract sessions → authenticate → compress → upload → advance offset. Session boundary detection is the only logic it owns.
 
-Reference the PRD (`ludotrace/internal/_bmad-output/planning-artifacts/prds/`) for vision and the architecture spine (`ludotrace/internal/_bmad-output/planning-artifacts/architecture/architecture-ludotrace-2026-07-02/ARCHITECTURE-SPINE.md`) for data flow and stack decisions.
-
 ---
 
 ## Responsibilities
