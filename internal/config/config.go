@@ -145,6 +145,16 @@ func OffsetPath(gameID string) (string, error) {
 	return filepath.Join(d, "offsets", gameID+".offset"), nil
 }
 
+// KnownGamesCachePath is the last-known-good cache of Core's GET /v1/games
+// response, used by the Add Game picker when Core is unreachable.
+func KnownGamesCachePath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "known_games.json"), nil
+}
+
 func validateURL(raw string) error {
 	u, err := url.ParseRequestURI(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {

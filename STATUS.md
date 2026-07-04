@@ -49,4 +49,8 @@ Code exists and is wired up; not confirmed working under real conditions.
 
 Appears in `CLAUDE.md` design notes or tracked design docs; no implementation exists.
 
-- **Cloudflare Access service token on client requests** — add `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers to all client HTTP requests to Core. No header injection present in `internal/uploader/uploader.go` or `internal/auth/auth.go`. Infra/ops item tracked in `internal/STATUS.md`, not a design decision (architecture spine Deferred).
+Nothing currently tracked here. (Cloudflare Access service-token headers on client
+requests were considered and rejected 2026-07-04 — Access is the wrong tool for a
+consumer-facing API reachable by every user's client and browser; the Access
+application on `core.ludotrace.com` was removed rather than built around. Core's own
+per-user Clerk/Core-signed JWT auth is the real gate.)

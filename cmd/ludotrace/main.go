@@ -21,6 +21,7 @@ import (
 	"github.com/ludotrace/client/internal/autostart"
 	"github.com/ludotrace/client/internal/config"
 	"github.com/ludotrace/client/internal/keychain"
+	"github.com/ludotrace/client/internal/knowngames"
 	"github.com/ludotrace/client/internal/lock"
 	"github.com/ludotrace/client/internal/queue"
 	"github.com/ludotrace/client/internal/session"
@@ -169,7 +170,7 @@ func main() {
 	// gamesMu serializes Add Game handler runs (concurrent clicks) and
 	// guards cfg.Games appends alongside extractors' own locking.
 	var gamesMu sync.Mutex
-	t.SetAddGameHandler(makeAddGameHandler(&gamesMu, cfg, q, w, extractors, t))
+	t.SetAddGameHandler(makeAddGameHandler(ctx, &gamesMu, cfg, q, w, extractors, t, authClient))
 
 	// Reconcile any staged update left on disk. A staged binary newer than the
 	// running version is a genuine pending update → re-surface the tray item.
@@ -598,12 +599,12 @@ func (s *extractorStore) set(gameID string, e *session.Extractor) {
 // silently dropped. Registering the extractor first closes that window;
 // watcher.AddGame's own idempotency guard makes it safe even if AddGame
 // then fails and the whole handler is retried for the same game.
-func makeAddGameHandler(gamesMu *sync.Mutex, cfg *config.Config, q *queue.Queue, w *watcher.Watcher, extractors *extractorStore, t *tray.Tray) func() {
+func makeAddGameHandler(ctx context.Context, gamesMu *sync.Mutex, cfg *config.Config, q *queue.Queue, w *watcher.Watcher, extractors *extractorStore, t *tray.Tray, authClient auth.Client) func() {
 	return func() {
 		gamesMu.Lock()
 		defer gamesMu.Unlock()
 
-		g, err := resolveNewGame(cfg)
+		g, err := resolveNewGame(ctx, cfg, authClient)
 		if err != nil {
 			var aa *alreadyAddedError
 			if errors.As(err, &aa) {
@@ -686,7 +687,7 @@ func notifyGameError(err error) {
 // resolveNewGame runs the two-stage Add Game flow and returns the game to
 // add. A nil game with a nil error means the user cancelled — the caller
 // shows neither a confirmation nor a failure.
-func resolveNewGame(cfg *config.Config) (*config.Game, error) {
+func resolveNewGame(ctx context.Context, cfg *config.Config, authClient auth.Client) (*config.Game, error) {
 	discovered, err := steam.Discover()
 	if err != nil {
 		slog.Warn("steam discovery failed", "err", err)
@@ -719,20 +720,32 @@ func resolveNewGame(cfg *config.Config) (*config.Game, error) {
 		return &g, nil
 	}
 
-	// Unrecognized folder: steam.Registry is the "dropdown" of known games,
-	// by display name, not free-text game_id (MVP-scoped to one entry —
-	// sqweek/dialog has no native list-selection widget, so each remaining
-	// candidate is offered as a Yes/No prompt instead of a real dropdown;
-	// see the spec's Design Notes for why).
+	// Unrecognized folder: the dropdown of known games comes from Core's
+	// GET /v1/games (client#29), not a compile-time list, so a game added to
+	// Core's registry appears here without a client release. sqweek/dialog
+	// has no native list-selection widget, so each remaining candidate is
+	// offered as a Yes/No prompt instead of a real dropdown (see the spec's
+	// Design Notes for why). The picked folder itself becomes watch_path —
+	// these games' watch paths aren't Steam-derivable, so there is no
+	// per-game default-path table; events_file is the game's conventional
+	// name (steam.EventsFileName).
+	knownGames, err := knowngames.List(ctx, cfg.CoreURL, authClient)
+	if err != nil {
+		return nil, fmt.Errorf("could not load known games list: %w", err)
+	}
 	offered := false
-	for _, kg := range steam.Registry {
+	for _, kg := range knownGames {
 		if gameConfigured(cfg.Games, kg.GameID) {
 			continue
 		}
 		offered = true
-		prompt := fmt.Sprintf("The folder %q wasn't recognized automatically.\n\nAdd it as %q?", folderName, kg.DisplayName)
+		prompt := fmt.Sprintf("The folder %q wasn't recognized automatically.\n\nAdd it as %q?", folderName, kg.Name)
 		if dialog.Message("%s", prompt).Title("Unrecognized Folder").YesNo() {
-			g := steam.GameFromFolder(kg, picked)
+			g := config.Game{
+				GameID:     kg.GameID,
+				WatchPath:  picked,
+				EventsFile: steam.EventsFileName(kg.GameID),
+			}
 			return &g, nil
 		}
 	}
@@ -770,13 +783,22 @@ func gameConfigured(games []config.Game, gameID string) bool {
 	return false
 }
 
-// displayName looks up the known-games display name for a game_id, falling
-// back to the game_id itself if it's somehow not in the registry (shouldn't
-// happen — every config.Game this flow produces comes from steam.Registry).
+// displayName looks up a display name for gameID: first the local Steam
+// registry (auto-discovery matches), then the knowngames cache — warmed by
+// resolveNewGame's List call moments earlier in the same handler run, so a
+// cache-only (no network) read is enough here. Falls back to the game_id
+// itself if neither has it.
 func displayName(gameID string) string {
 	for _, kg := range steam.Registry {
 		if kg.GameID == gameID {
 			return kg.DisplayName
+		}
+	}
+	if games, err := knowngames.ReadCache(); err == nil {
+		for _, g := range games {
+			if g.GameID == gameID {
+				return g.Name
+			}
 		}
 	}
 	return gameID

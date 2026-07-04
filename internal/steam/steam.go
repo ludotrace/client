@@ -9,6 +9,7 @@ package steam
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -62,6 +63,14 @@ func GameFromFolder(kg KnownGame, watchPath string) config.Game {
 		WatchPath:  watchPath,
 		EventsFile: kg.EventsFile,
 	}
+}
+
+// EventsFileName returns the conventional events-file name for a game_id
+// (root CLAUDE.md's JSONL schema convention: lt_<game>_events.jsonl). Used to
+// resolve EventsFile for games sourced from Core's GET /v1/games, which
+// carries only game_id + name — not the file name (client#29 Part B).
+func EventsFileName(gameID string) string {
+	return fmt.Sprintf("lt_%s_events.jsonl", gameID)
 }
 
 // DedupeNew filters discovered down to games whose GameID is not already
