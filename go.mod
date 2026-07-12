@@ -8,7 +8,8 @@ require (
 	github.com/getlantern/systray v1.2.2
 	github.com/sqweek/dialog v0.0.0-20260123140253-64c163d53aac
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/sys v0.46.0
+	go.uber.org/goleak v1.3.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -23,5 +24,4 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
-	go.uber.org/goleak v1.3.0 // indirect
 )
