@@ -547,7 +547,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if errors.Is(err, uploader.ErrLimitReached) {
 			t.SetState(tray.StateLimitReached)
 			_ = q.UpdateAttempts(item.TmpPath)
-			if !wait(60 * time.Second) {
+			if !wait(limitReachedWait(err)) {
 				return
 			}
 			continue
@@ -583,6 +583,42 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			backoff.reset()
 		}
 	}
+}
+
+const (
+	// limitReachedDefaultWait is the poll interval used on a 429 when Core did
+	// not send a usable Retry-After hint (older Core, or the header absent).
+	limitReachedDefaultWait = 60 * time.Second
+	// limitReachedMinWait floors an honored Retry-After. Core's real hint is on
+	// the order of days, but an aggressively small value (e.g. "Retry-After: 1")
+	// would otherwise have us hammer Core's advisory-locked count query for no
+	// benefit; 5s is the tightest re-poll we'll honor.
+	limitReachedMinWait = 5 * time.Second
+	// limitReachedMaxWait caps an honored Retry-After. Free-tier quota windows
+	// are ~3 days, but a bogus or huge header value (or clock skew on an
+	// HTTP-date form) must not park the worker effectively forever; a 24h
+	// ceiling bounds the wait so we re-check at least daily regardless.
+	limitReachedMaxWait = 24 * time.Hour
+)
+
+// limitReachedWait decides how long to wait after a 429 upload_limit_reached.
+// It honors a server-provided Retry-After hint (carried on
+// *uploader.LimitReachedError) clamped to [limitReachedMinWait,
+// limitReachedMaxWait], and falls back to limitReachedDefaultWait when no valid
+// hint is present.
+func limitReachedWait(err error) time.Duration {
+	var lre *uploader.LimitReachedError
+	if errors.As(err, &lre) && lre.RetryAfter > 0 {
+		d := lre.RetryAfter
+		if d < limitReachedMinWait {
+			d = limitReachedMinWait
+		}
+		if d > limitReachedMaxWait {
+			d = limitReachedMaxWait
+		}
+		return d
+	}
+	return limitReachedDefaultWait
 }
 
 // extractorStore is a mutex-guarded map[string]*session.Extractor. Before

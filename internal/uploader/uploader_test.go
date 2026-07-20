@@ -96,6 +96,99 @@ func TestUpload_429(t *testing.T) {
 	}
 }
 
+func TestUpload_429_RetryAfterDeltaSeconds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "43200")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	filePath := writeTempFile(t, "data")
+	_, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+
+	if !errors.Is(err, ErrLimitReached) {
+		t.Fatalf("got %v, want error wrapping ErrLimitReached", err)
+	}
+	var lre *LimitReachedError
+	if !errors.As(err, &lre) {
+		t.Fatalf("got %v, want *LimitReachedError", err)
+	}
+	if lre.RetryAfter != 43200*time.Second {
+		t.Fatalf("got RetryAfter %v, want %v", lre.RetryAfter, 43200*time.Second)
+	}
+}
+
+func TestUpload_429_RetryAfterHTTPDate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", time.Now().Add(2*time.Hour).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	filePath := writeTempFile(t, "data")
+	_, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+
+	var lre *LimitReachedError
+	if !errors.As(err, &lre) {
+		t.Fatalf("got %v, want *LimitReachedError", err)
+	}
+	// Allow slack for round-trip latency; HTTP-date has 1s resolution.
+	if lre.RetryAfter < 110*time.Minute || lre.RetryAfter > 2*time.Hour {
+		t.Fatalf("got RetryAfter %v, want ~2h", lre.RetryAfter)
+	}
+}
+
+func TestUpload_429_NoRetryAfterHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	filePath := writeTempFile(t, "data")
+	_, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+
+	var lre *LimitReachedError
+	if !errors.As(err, &lre) {
+		t.Fatalf("got %v, want *LimitReachedError", err)
+	}
+	if lre.RetryAfter != 0 {
+		t.Fatalf("got RetryAfter %v, want 0 (not provided)", lre.RetryAfter)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		value   string
+		wantDur time.Duration
+		wantOK  bool
+	}{
+		{"delta seconds", "43200", 43200 * time.Second, true},
+		{"delta seconds one", "1", 1 * time.Second, true},
+		{"delta seconds surrounding whitespace", "  120  ", 120 * time.Second, true},
+		{"empty", "", 0, false},
+		{"zero", "0", 0, false},
+		{"negative", "-5", 0, false},
+		{"non-numeric garbage", "soon", 0, false},
+		{"http-date future", now.Add(90 * time.Minute).Format(http.TimeFormat), 90 * time.Minute, true},
+		{"http-date past", now.Add(-90 * time.Minute).Format(http.TimeFormat), 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDur, gotOK := parseRetryAfter(tt.value, now)
+			if gotOK != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotOK && gotDur != tt.wantDur {
+				t.Fatalf("dur = %v, want %v", gotDur, tt.wantDur)
+			}
+		})
+	}
+}
+
 func TestUpload_400(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
