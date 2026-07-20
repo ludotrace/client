@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/textproto"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,6 +22,61 @@ var (
 	ErrLimitReached = errors.New("uploader: upload limit reached (429)")
 	ErrTransient    = errors.New("uploader: transient failure after retries")
 )
+
+// LimitReachedError is returned on a 429 upload_limit_reached response. It
+// wraps the ErrLimitReached sentinel (so existing errors.Is checks keep
+// working) and carries an optional server-provided Retry-After hint.
+//
+// RetryAfter is the parsed value of the response's RFC 7231 Retry-After
+// header, converted to a delay from the moment the response was received. A
+// zero value means the server did not send a usable hint (header absent,
+// non-positive, or unparseable) and the caller should fall back to its own
+// default wait.
+type LimitReachedError struct {
+	RetryAfter time.Duration
+}
+
+func (e *LimitReachedError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("uploader: upload limit reached (429), retry after %s", e.RetryAfter)
+	}
+	return ErrLimitReached.Error()
+}
+
+func (e *LimitReachedError) Unwrap() error { return ErrLimitReached }
+
+// parseRetryAfter parses an RFC 7231 Retry-After header value relative to now.
+// It supports both defined forms: delta-seconds (a non-negative integer number
+// of seconds) and HTTP-date. It returns (d, true) only when the value parses to
+// a strictly positive delay; an empty, non-positive, past-dated, or unparseable
+// value yields (0, false), signalling the caller to use its own fallback. Go's
+// net/http parses HTTP-date on the client side via http.ParseTime, but does not
+// parse the Retry-After header itself, so this handles both forms.
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+
+	// delta-seconds form: 1*DIGIT, no sign per the grammar. A "0" or malformed
+	// negative carries no useful "wait this long" signal, so treat as absent.
+	if secs, err := strconv.Atoi(value); err == nil {
+		if secs <= 0 {
+			return 0, false
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+
+	// HTTP-date form.
+	if t, err := http.ParseTime(value); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, false
+	}
+
+	return 0, false
+}
 
 type ErrBadRequest struct {
 	Reason string
@@ -161,7 +218,11 @@ func doUpload(ctx context.Context, coreURL, gameID, filePath, token string) (str
 		return "", ErrFileTooLarge
 
 	case http.StatusTooManyRequests:
-		return "", ErrLimitReached
+		lre := &LimitReachedError{}
+		if d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+			lre.RetryAfter = d
+		}
+		return "", lre
 
 	case http.StatusBadRequest:
 		var er errorResponse
