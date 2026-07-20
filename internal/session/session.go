@@ -212,9 +212,10 @@ func (e *Extractor) writeAndEnqueue(sess *openSession, endOffset int64) error {
 	}
 
 	return e.q.Enqueue(queue.Item{
-		GameID:    e.gameID,
-		TmpPath:   tmpPath,
-		EndOffset: endOffset,
+		GameID:     e.gameID,
+		TmpPath:    tmpPath,
+		EndOffset:  endOffset,
+		CapturedAt: time.Now(),
 	})
 }
 

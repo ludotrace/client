@@ -6,14 +6,28 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 )
+
+// defaultQueueMaxAgeDays bounds how long a session may sit in the local upload
+// queue before it is dropped. 30 days = 2x Core's UPLOAD_WINDOW_DAYS (15):
+// enough runway for a transient overage on any tier to self-resolve as old
+// jobs age out, while still bounding steady-state disk growth for the
+// structural Free-tier case (5 uploads / rolling 15d) where arrival rate
+// permanently exceeds admission rate. Overridable via QUEUE_MAX_AGE_DAYS.
+const defaultQueueMaxAgeDays = 30
 
 type Config struct {
 	CoreURL string `toml:"core_url"`
 	AppURL  string `toml:"app_url"`
 	Games   []Game `toml:"games"`
+
+	// QueueMaxAgeDays is env-driven (QUEUE_MAX_AGE_DAYS), not a TOML field —
+	// it mirrors Core's env-configured UPLOAD_WINDOW_DAYS rather than being a
+	// user-facing config-file setting. Always populated by Load().
+	QueueMaxAgeDays int `toml:"-"`
 }
 
 type Game struct {
@@ -34,8 +48,9 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		CoreURL: "https://core.ludotrace.com",
-		AppURL:  "https://app.ludotrace.com",
+		CoreURL:         "https://core.ludotrace.com",
+		AppURL:          "https://app.ludotrace.com",
+		QueueMaxAgeDays: queueMaxAgeDays(),
 	}
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -153,6 +168,24 @@ func KnownGamesCachePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(d, "known_games.json"), nil
+}
+
+// queueMaxAgeDays reads QUEUE_MAX_AGE_DAYS, falling back to
+// defaultQueueMaxAgeDays when unset, unparseable, or non-positive. A
+// non-positive value is treated as "use the default" rather than "never
+// evict" — disabling the bound is not an env-typo outcome we want to honour.
+func queueMaxAgeDays() int {
+	v := os.Getenv("QUEUE_MAX_AGE_DAYS")
+	if v == "" {
+		return defaultQueueMaxAgeDays
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		slog.Warn("config: invalid QUEUE_MAX_AGE_DAYS, using default",
+			"value", v, "default", defaultQueueMaxAgeDays)
+		return defaultQueueMaxAgeDays
+	}
+	return n
 }
 
 func validateURL(raw string) error {
