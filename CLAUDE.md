@@ -194,6 +194,11 @@ Matching is by exact base filename against `events_file` in config — no glob, 
 # Override config for development
 LUDOTRACE_CORE_URL=http://localhost:8080
 LUDOTRACE_LOG_LEVEL=debug
+
+# Max age (days) a session may sit in the local upload queue before it is
+# dropped (oldest-first). Bounds queue growth for a chronically over-quota
+# player. Default 30 (= 2x Core's UPLOAD_WINDOW_DAYS). Invalid or <=0 → default.
+QUEUE_MAX_AGE_DAYS=30
 ```
 
 ---

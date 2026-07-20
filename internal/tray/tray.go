@@ -48,6 +48,7 @@ type Tray struct {
 	signInErr     string
 	queuedMsg     string
 	uploadingGame string
+	droppedCount  int
 	retryCh       chan struct{}
 
 	updateCh          chan updateNote
@@ -154,6 +155,42 @@ func (t *Tray) SetQueued(msg string) {
 // retry immediately. Sends are non-blocking, so signals are coalesced.
 func (t *Tray) RetryCh() <-chan struct{} {
 	return t.retryCh
+}
+
+// NotifyDropped surfaces that count session(s) were dropped from the local
+// queue for exceeding the max age — which only happens to a player who has
+// been over quota too long, so the correct state is StateLimitReached with the
+// drop count appended to the status line. The count accumulates across drop
+// events within one over-quota spell and is cleared by ResetDropped on the
+// next successful upload. Called only from the upload worker goroutine
+// (alongside ResetDropped), so droppedCount has a single writer; the tray's
+// event loop only reads it, published via the state-channel send SetState does.
+func (t *Tray) NotifyDropped(count int) {
+	if count <= 0 {
+		return
+	}
+	t.droppedCount += count
+	t.SetState(StateLimitReached)
+}
+
+// ResetDropped clears the accumulated drop count once an upload succeeds, so a
+// later plain limit-reached (429) does not re-show a stale drop notice. Must be
+// called from the same goroutine as NotifyDropped (the upload worker).
+func (t *Tray) ResetDropped() {
+	t.droppedCount = 0
+}
+
+// limitReachedTitle renders the StateLimitReached status line, appending the
+// drop count when sessions have been aged out of the queue.
+func limitReachedTitle(dropped int) string {
+	if dropped <= 0 {
+		return "Free upload limit reached"
+	}
+	noun := "sessions"
+	if dropped == 1 {
+		noun = "session"
+	}
+	return fmt.Sprintf("Free upload limit reached — %d old %s dropped", dropped, noun)
 }
 
 // SetUploading sets the game name displayed during upload and transitions to StateUploading.
@@ -269,7 +306,7 @@ func (t *Tray) applyState(s State, m *menuItems) {
 
 	case StateLimitReached:
 		systray.SetIcon(iconError)
-		m.statusLine.SetTitle("Free upload limit reached")
+		m.statusLine.SetTitle(limitReachedTitle(t.droppedCount))
 		showAuthenticatedBase(m, false)
 
 	case StateQueued:

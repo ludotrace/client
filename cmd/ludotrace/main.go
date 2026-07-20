@@ -462,6 +462,26 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		default:
 		}
 
+		// Age-based drop-oldest: evict any session that has sat in the queue
+		// past the configured max age (oldest-first) before selecting, and
+		// clean up its temp file — keeping the tail bounded for a chronically
+		// over-quota player. Derived from persisted CapturedAt, so it holds
+		// across a restart. This bounds the tail; selection below serves the
+		// head newest-first — the two orders are intentionally distinct.
+		maxAge := time.Duration(cfg.QueueMaxAgeDays) * 24 * time.Hour
+		if dropped, derr := q.EvictExpired(maxAge, time.Now()); derr != nil {
+			slog.Warn("failed to evict expired queue items", "err", derr)
+		} else if len(dropped) > 0 {
+			for _, it := range dropped {
+				if rerr := os.Remove(it.TmpPath); rerr != nil && !os.IsNotExist(rerr) {
+					slog.Warn("failed to remove dropped temp file", "path", it.TmpPath, "err", rerr)
+				}
+			}
+			slog.Warn("dropped old sessions, over quota too long",
+				"count", len(dropped), "max_age_days", cfg.QueueMaxAgeDays)
+			t.NotifyDropped(len(dropped))
+		}
+
 		if q.Len() == 0 {
 			if !wait(5 * time.Second) {
 				return
@@ -469,7 +489,10 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			continue
 		}
 
-		item, ok := q.Peek()
+		// Newest-first: attempt the most recently captured session, not the
+		// oldest arrival. The over-quota player's scarce quota budget should go
+		// to the session they just played, not an ever-staler backlog.
+		item, ok := q.PeekNewest()
 		if !ok {
 			continue
 		}
@@ -507,6 +530,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			}
 			slog.Info("upload succeeded", "game_id", item.GameID, "job_id", jobID)
 			backoff.reset()
+			t.ResetDropped()
 			t.SetState(tray.StateIdle)
 			continue
 		}
