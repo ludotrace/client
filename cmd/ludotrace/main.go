@@ -515,7 +515,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 
 		t.SetUploading(item.GameID)
 
-		jobID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token)
+		jobID, traceID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token)
 		if err == nil {
 			if ext, ok := extractors.get(item.GameID); ok {
 				if aerr := ext.AdvanceOffset(item.EndOffset); aerr != nil {
@@ -555,15 +555,17 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 
 		var badReq uploader.ErrBadRequest
 		if errors.Is(err, uploader.ErrFileTooLarge) || errors.As(err, &badReq) {
-			slog.Error("upload failed permanently, dropping item", "game_id", item.GameID, "err", err)
+			slog.Error("upload failed permanently, dropping item", "game_id", item.GameID, "err", err, "trace_id", traceID)
 			q.Dequeue()
-			t.SetError(err.Error())
+			// client#64: trace_id in the tray text is the only place a
+			// support case can pick it up without digging through the log.
+			t.SetError(fmt.Sprintf("%s (trace %s)", err.Error(), traceID))
 			continue
 		}
 
 		// ErrTransient or unknown — recoverable. Queue the sessions and retry
 		// with escalating backoff rather than alarming the user with an error.
-		slog.Warn("upload failed transiently", "game_id", item.GameID, "err", err)
+		slog.Warn("upload failed transiently", "game_id", item.GameID, "err", err, "trace_id", traceID)
 		_ = q.UpdateAttempts(item.TmpPath)
 		delay := backoff.next()
 		t.SetQueued(queuedMessage(q.Len(), delay))

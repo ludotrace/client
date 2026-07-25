@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ludotrace/client/internal/tracing"
 )
 
 var (
@@ -96,8 +98,21 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
-func Upload(ctx context.Context, coreURL, gameID, filePath, token string) (string, error) {
+// Upload POSTs the session at filePath to Core, retrying transient failures.
+// It also returns the W3C trace ID generated for this call (client#64,
+// companion to core#80) — a fresh ID per Upload call, reused across its
+// retries so every attempt shows up on the same trace once Core's OTel
+// pipeline honors the incoming traceparent. Callers surface it on a failed
+// upload so a support case can be correlated against Core's trace.
+func Upload(ctx context.Context, coreURL, gameID, filePath, token string) (string, string, error) {
 	backoffs := []time.Duration{0, 200 * time.Millisecond, 400 * time.Millisecond}
+
+	traceID, err := tracing.NewTraceID()
+	if err != nil {
+		// Best-effort: tracing must never block an upload. An empty traceID
+		// just means doUpload skips the traceparent header for this call.
+		traceID = ""
+	}
 
 	var lastErr error
 	for attempt, delay := range backoffs {
@@ -106,24 +121,24 @@ func Upload(ctx context.Context, coreURL, gameID, filePath, token string) (strin
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return "", ctx.Err()
+				return "", traceID, ctx.Err()
 			case <-timer.C:
 			}
 		}
 
-		jobID, err := doUpload(ctx, coreURL, gameID, filePath, token)
+		jobID, err := doUpload(ctx, coreURL, gameID, filePath, token, traceID)
 		if err == nil {
-			return jobID, nil
+			return jobID, traceID, nil
 		}
 
 		// Only retry on transient errors; permanent 4xx errors return immediately.
 		if !isTransient(err) {
-			return "", err
+			return "", traceID, err
 		}
 		lastErr = err
 	}
 
-	return "", fmt.Errorf("%w: %v", ErrTransient, lastErr)
+	return "", traceID, fmt.Errorf("%w: %v", ErrTransient, lastErr)
 }
 
 func isTransient(err error) bool {
@@ -143,7 +158,7 @@ func isTransient(err error) bool {
 	return true
 }
 
-func doUpload(ctx context.Context, coreURL, gameID, filePath, token string) (string, error) {
+func doUpload(ctx context.Context, coreURL, gameID, filePath, token, traceID string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return "", err
@@ -194,6 +209,11 @@ func doUpload(ctx context.Context, coreURL, gameID, filePath, token string) (str
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+token)
+	if traceID != "" {
+		if traceParent, err := tracing.TraceParent(traceID); err == nil {
+			req.Header.Set("traceparent", traceParent)
+		}
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
