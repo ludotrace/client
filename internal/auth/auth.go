@@ -24,6 +24,7 @@ import (
 
 	"github.com/ludotrace/client/internal/browser"
 	"github.com/ludotrace/client/internal/keychain"
+	"github.com/ludotrace/client/internal/tracing"
 )
 
 // Sentinel errors that callers (e.g. tray) can check with errors.Is.
@@ -345,6 +346,14 @@ func (c *authClient) fetchJWT(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("auth: build token request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+opaque)
+	// client#64, companion to core#80: root Core's trace at this request
+	// rather than letting it mint its own. Best-effort — a rand failure just
+	// means this call goes untraced, never blocks the token exchange.
+	if traceID, err := tracing.NewTraceID(); err == nil {
+		if traceParent, err := tracing.TraceParent(traceID); err == nil {
+			req.Header.Set("traceparent", traceParent)
+		}
+	}
 
 	resp, err := c.httpCli.Do(req)
 	if err != nil {
