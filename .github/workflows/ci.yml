@@ -12,6 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # STATUS.md is state, not history — this keeps it from growing back into a
+      # changelog, which is what makes `git log -p STATUS.md` usable as one.
+      - name: check STATUS.md
+        run: ./scripts/check-status.sh
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
