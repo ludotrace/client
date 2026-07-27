@@ -61,9 +61,6 @@ Confirmed by manual end-to-end test or observed running.
 
 ## Designed, not yet implemented
 
-- **Inactivity flush threshold is wrong** — the code uses 10 minutes, the spec and PRD say 30
-  (#69). Launch-blocking: it splits one play period into several Batches, inflating cost and
-  quota and thinning each Insight.
 - Full client-side OpenTelemetry instrumentation — spans, metrics, logs (#66)
 - Autostart hardening — warn on a non-permanent path (#24), surface registry-write failure in
   the tray (#23), deregister on uninstall (#22)

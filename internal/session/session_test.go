@@ -41,6 +41,15 @@ func makeOld(t *testing.T, path string) {
 	}
 }
 
+// TestOrphanThresholdValue pins the inactivity boundary. The docs (CLAUDE.md
+// Watcher Logic, README, PRD) all quote this number, so a change here must be a
+// deliberate one that updates them too.
+func TestOrphanThresholdValue(t *testing.T) {
+	if want := 12 * time.Minute; orphanThreshold != want {
+		t.Fatalf("orphanThreshold = %v, want %v", orphanThreshold, want)
+	}
+}
+
 func TestExtract_OneCompleteSession(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
@@ -81,6 +90,45 @@ func TestExtract_OneCompleteSession(t *testing.T) {
 	got := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	if len(got) != 3 {
 		t.Errorf("temp file has %d lines, want 3", len(got))
+	}
+}
+
+// TestExtract_InactivityBoundary walks the threshold from both sides: a pause
+// shorter than orphanThreshold leaves the session open, a longer one flushes it.
+func TestExtract_InactivityBoundary(t *testing.T) {
+	cases := []struct {
+		name    string
+		idle    time.Duration
+		wantLen int
+	}{
+		{"just under threshold stays open", orphanThreshold - time.Minute, 0},
+		{"just over threshold flushes", orphanThreshold + time.Minute, 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			eventsPath := filepath.Join(dir, "events.jsonl")
+			offsetPath := filepath.Join(dir, "offset")
+			q := newTestQueue(t)
+
+			writeEvents(t, eventsPath, []string{
+				`{"type":"session_start","session_id":"s1"}`,
+				`{"type":"kill","target":"radroach"}`,
+			})
+			past := time.Now().Add(-tc.idle)
+			if err := os.Chtimes(eventsPath, past, past); err != nil {
+				t.Fatalf("Chtimes: %v", err)
+			}
+
+			e := New("fallout4", eventsPath, offsetPath, dir, q)
+			if err := e.Extract(); err != nil {
+				t.Fatalf("Extract: %v", err)
+			}
+			if q.Len() != tc.wantLen {
+				t.Errorf("after %v idle: queued %d, want %d", tc.idle, q.Len(), tc.wantLen)
+			}
+		})
 	}
 }
 

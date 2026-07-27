@@ -81,13 +81,14 @@ complete sessions.
   session. Games emit it on wildly different cadences (Fallout 4 writes one per *save*, so
   one play session contains many), so treating it as a terminator would split or drop data
   based on a game-specific quirk. Keep this game-agnostic.
-- **Inactivity flush** closes the open session when the events file has gone quiet. This is
-  the generic "the player stopped" signal, and it is what closes the final session of a play
-  period — including one that ended with no clean `session_end` at all (crash, or quit with
-  no final save). For Fallout 4 it closes *every* session.
+- **Inactivity flush** closes the open session when the events file has gone quiet for
+  **12 minutes**. This is the generic "the player stopped" signal, and it is what closes the
+  final session of a play period — including one that ended with no clean `session_end` at
+  all (crash, or quit with no final save). For Fallout 4 it closes *every* session.
 
-  ⚠️ **The threshold is currently wrong and the fix is launch-blocking** — the code uses 10
-  minutes, the spec and PRD say 30. See **#69** before changing anything in this area.
+  `orphanThreshold` in `internal/session/session.go` is the single definition of that value —
+  the PRD, the architecture spine's AD-2, and the mod scaffolding guide all quote it. Change
+  it there and update those together; never add a second place that states the number.
 - **Sidecar offset** at `<config_dir>/offsets/<game_id>.offset`, advanced only on 202. A
   missing offset restarts from byte 0.
 - **Missing events file** — watch the parent directory, promote to a file watch on CREATE.
