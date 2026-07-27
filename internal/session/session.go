@@ -15,7 +15,10 @@ import (
 	"github.com/ludotrace/client/internal/queue"
 )
 
-const orphanThreshold = 10 * time.Minute
+// orphanThreshold is how long the events file must go unwritten before an open
+// session is treated as finished. It is the single source of truth for the
+// inactivity boundary; the docs describe this value, not a separate one.
+const orphanThreshold = 12 * time.Minute
 
 type Extractor struct {
 	gameID     string

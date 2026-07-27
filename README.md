@@ -20,7 +20,7 @@ Authenticates with Core, uploads each session as gzip JSONL
 Advances sidecar offset on 202 — never reprocesses uploaded sessions
 ```
 
-Sessions that end abruptly (crash, force-quit) are uploaded after 30 minutes of inactivity.
+Sessions that end abruptly (crash, force-quit) are uploaded after 12 minutes of inactivity.
 
 ---
 
