@@ -27,11 +27,6 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make build-windows
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ludotrace-windows
-          path: dist/ludotrace.exe
-          retention-days: 7
 
   # Exercise the CGO/Cocoa darwin build and the CGO+GTK linux build on every
   # push — these cannot be cross-compiled from the Windows build host, so a
