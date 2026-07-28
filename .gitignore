@@ -1,2 +1,3 @@
 dist/
 /ludotrace
+cmd/ludotrace/rsrc_windows_*.syso

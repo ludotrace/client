@@ -1,5 +1,12 @@
 package main
 
+// Windows exe icon + version info, embedded via a generated .syso that "go
+// build" picks up automatically when GOOS=windows. Regenerate with
+// `go generate ./cmd/ludotrace/` (the Makefile does this before every
+// build-windows). Not committed — see .gitignore — so the version info
+// always reflects the current git tag rather than going stale.
+//go:generate go tool go-winres simply --arch amd64 --out rsrc --icon ../../internal/tray/assets/app.ico --manifest gui --product-name LudoTrace --file-description "LudoTrace client daemon" --product-version git-tag --file-version git-tag
+
 import (
 	"context"
 	"errors"

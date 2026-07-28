@@ -30,6 +30,7 @@ build-mac-arm:
 build-windows:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY).exe
+	go generate ./cmd/ludotrace/
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui $(LDFLAGSBASE)" -o $(DIST)/$(BINARY).exe $(PKG)
 
 # Requires: pkg-config libgtk-3-dev libayatana-appindicator3-dev gnome-keyring
