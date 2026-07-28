@@ -79,10 +79,12 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
-          # No binary assets attached — binaries are served from ludotrace.com/downloads/
+          # Binaries are release assets here — the site links to them via the
+          # GitHub "latest" download alias, it no longer hosts them itself.
+          files: dist/*
 
   publish-site:
-    name: Publish to site repo
+    name: Publish manifest to site repo
     needs: [build, github-release]
     runs-on: ubuntu-latest
     steps:
@@ -99,17 +101,10 @@ jobs:
           token: ${{ secrets.SITE_DEPLOY_TOKEN }}
           path: site
 
-      - name: Copy binaries into site downloads/
-        run: |
-          mkdir -p site/downloads
-          cp dist/ludotrace-mac-x64   site/downloads/ludotrace-mac-x64
-          cp dist/ludotrace-mac-arm64 site/downloads/ludotrace-mac-arm64
-          cp dist/ludotrace.exe       site/downloads/ludotrace.exe
-          cp dist/ludotrace-linux     site/downloads/ludotrace-linux
-
       - name: Write version manifest
         env:
           VERSION: ${{ github.ref_name }}
+          ASSET_BASE: https://github.com/ludotrace/client/releases/download/${{ github.ref_name }}
         run: |
           SHA_MAC_X64=$(awk '{print $1}' dist/ludotrace-mac-x64.sha256)
           SHA_MAC_ARM=$(awk '{print $1}' dist/ludotrace-mac-arm64.sha256)
@@ -122,10 +117,10 @@ jobs:
             "version": "${VERSION#v}",
             "next_check_seconds": 86400,
             "platforms": {
-              "darwin/amd64":  { "url": "https://ludotrace.com/downloads/ludotrace-mac-x64",   "sha256": "${SHA_MAC_X64}" },
-              "darwin/arm64":  { "url": "https://ludotrace.com/downloads/ludotrace-mac-arm64",  "sha256": "${SHA_MAC_ARM}" },
-              "windows/amd64": { "url": "https://ludotrace.com/downloads/ludotrace.exe",         "sha256": "${SHA_WIN}" },
-              "linux/amd64":   { "url": "https://ludotrace.com/downloads/ludotrace-linux",       "sha256": "${SHA_LINUX}" }
+              "darwin/amd64":  { "url": "${ASSET_BASE}/ludotrace-mac-x64",   "sha256": "${SHA_MAC_X64}" },
+              "darwin/arm64":  { "url": "${ASSET_BASE}/ludotrace-mac-arm64",  "sha256": "${SHA_MAC_ARM}" },
+              "windows/amd64": { "url": "${ASSET_BASE}/ludotrace.exe",         "sha256": "${SHA_WIN}" },
+              "linux/amd64":   { "url": "${ASSET_BASE}/ludotrace-linux",       "sha256": "${SHA_LINUX}" }
             }
           }
           EOF
@@ -141,6 +136,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/ client/version.json index.html
+          git add client/version.json index.html
           git commit -m "release: client ${{ github.ref_name }}"
           git push
