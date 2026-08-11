@@ -96,6 +96,12 @@ complete sessions.
   ever moves forward: uploads are served newest-first, so end offsets come back out of order
   and a rewind would re-extract sessions the pipeline has already finished with. A missing
   offset restarts from byte 0.
+
+  **The extractor is the one thing that may move the mark backward**, and only when the
+  events file is shorter than the stored offset — the file was replaced, not appended to. It
+  writes the reset straight to the sidecar. Nothing else can: every end offset the shorter
+  file produces is below the old mark, so an unreset mark would swallow them all and each
+  pass would re-upload the same sessions.
 - **Missing events file** — watch the parent directory, promote to a file watch on CREATE.
 - **Durable queue** — extraction enqueues; a separate worker uploads. The watcher must never
   call upload directly.

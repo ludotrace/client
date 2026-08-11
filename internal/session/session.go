@@ -60,24 +60,32 @@ func (e *Extractor) readOffset() (int64, error) {
 	return offset, nil
 }
 
-// AdvanceOffset moves the persisted read position forward to offset. It only
-// ever advances: a request to move backwards is a no-op.
+// AdvanceOffset moves the read position forward as a session is retired. It
+// never moves it backward: items are retired newest-first (main.go's
+// PeekNewest), so a pass that enqueued two sessions can report the later
+// endOffset before the earlier one. Writing that earlier value would re-expose
+// bytes already sent, and Core does not dedupe — a re-upload is a second job, a
+// second LLM run, and another decrement of the user's upload limit.
 //
-// The upload worker retires items newest-first, so it hands back end offsets
-// out of order — retiring a newer session first, then an older one. Every
-// region below the high-water mark has already been extracted and enqueued, so
-// rewinding to the older item's end offset would have Extract() rebuild and
-// re-enqueue sessions the pipeline is already done with.
+// The comparison reads the file rather than caching in memory, so a
+// hand-edited offset stays authoritative and still rewinds. Extract() relies on
+// that too: when the events file is replaced by a shorter one it resets the
+// stored offset directly, because every endOffset the new file can produce is
+// below the old high-water mark and would be refused here.
 func (e *Extractor) AdvanceOffset(offset int64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	current, err := e.readOffset()
 	if err != nil {
-		return err
+		return fmt.Errorf("session: read offset: %w", err)
 	}
 	if offset <= current {
+		slog.Debug("session: ignoring non-advancing offset",
+			"game_id", e.gameID, "current", current, "requested", offset)
 		return nil
 	}
+
 	return writeOffsetFile(e.offsetPath, offset)
 }
 
@@ -136,10 +144,19 @@ func (e *Extractor) Extract() error {
 	// changed. Seeking past EOF succeeds silently and reads nothing, which
 	// would strand the game forever: no bytes read, so the offset never
 	// advances, so nothing ever uploads again. Restart from zero instead.
+	//
+	// The reset is written through to the sidecar, not just held for this pass.
+	// AdvanceOffset refuses anything at or below the stored value, and every
+	// endOffset the shorter file can produce is below the old mark — so leaving
+	// the mark in place would have each pass re-extract, re-enqueue and
+	// re-upload the same sessions indefinitely.
 	if fi.Size() < offset {
 		slog.Warn("session: events file shorter than stored offset; restarting from zero",
 			"game_id", e.gameID, "path", e.eventsPath, "size", fi.Size(), "offset", offset)
 		offset = 0
+		if werr := writeOffsetFile(e.offsetPath, 0); werr != nil {
+			return fmt.Errorf("session: reset offset: %w", werr)
+		}
 	}
 
 	if _, err := f.Seek(offset, 0); err != nil {
