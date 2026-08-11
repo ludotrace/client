@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -148,9 +149,8 @@ func TestAppendGame_RoundTrip(t *testing.T) {
 	t.Cleanup(func() { loadFrom = orig })
 
 	g := Game{
-		GameID:     "stardew",
-		WatchPath:  watchPath,
-		EventsFile: "lt_stardew_events.jsonl",
+		GameID:    "stardew",
+		WatchPath: watchPath,
 	}
 	if err := AppendGame(g); err != nil {
 		t.Fatalf("AppendGame: %v", err)
@@ -165,6 +165,46 @@ func TestAppendGame_RoundTrip(t *testing.T) {
 	}
 	if cfg.Games[0].GameID != "stardew" {
 		t.Errorf("GameID = %q", cfg.Games[0].GameID)
+	}
+	// events_file is never persisted; Load derives it from game_id.
+	if got := cfg.Games[0].EventsFile; got != "lt_stardew_events.jsonl" {
+		t.Errorf("EventsFile = %q, want lt_stardew_events.jsonl", got)
+	}
+}
+
+// A config.toml written before events_file was dropped from the schema still
+// loads: the stale key is ignored and the name is re-derived from game_id.
+func TestLoad_IgnoresLegacyEventsFileKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	watchPath := filepath.Join(tmpDir, "Fallout 4")
+	if err := os.Mkdir(watchPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(tmpDir, "config.toml")
+	body := "core_url = \"https://core.example.com\"\n" +
+		"app_url = \"https://app.example.com\"\n\n" +
+		"[[games]]\n" +
+		"  game_id = \"fallout4\"\n" +
+		"  watch_path = " + strconv.Quote(watchPath) + "\n" +
+		"  events_file = \"lt_fo4_events.jsonl\"\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := loadFrom
+	loadFrom = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { loadFrom = orig })
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Games) != 1 {
+		t.Fatalf("expected 1 game, got %d", len(cfg.Games))
+	}
+	if got := cfg.Games[0].EventsFile; got != "lt_fallout4_events.jsonl" {
+		t.Errorf("EventsFile = %q, want lt_fallout4_events.jsonl (derived, not the stale key)", got)
 	}
 }
 

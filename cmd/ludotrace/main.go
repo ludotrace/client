@@ -811,8 +811,7 @@ func resolveNewGame(ctx context.Context, cfg *config.Config, authClient auth.Cli
 	// offered as a Yes/No prompt instead of a real dropdown (see the spec's
 	// Design Notes for why). The picked folder itself becomes watch_path —
 	// these games' watch paths aren't Steam-derivable, so there is no
-	// per-game default-path table; events_file is the game's conventional
-	// name (steam.EventsFileName).
+	// per-game default-path table; the events-file name follows from game_id.
 	knownGames, err := knowngames.List(ctx, cfg.CoreURL, authClient)
 	if err != nil {
 		return nil, fmt.Errorf("could not load known games list: %w", err)
@@ -825,11 +824,7 @@ func resolveNewGame(ctx context.Context, cfg *config.Config, authClient auth.Cli
 		offered = true
 		prompt := fmt.Sprintf("The folder %q wasn't recognized automatically.\n\nAdd it as %q?", folderName, kg.Name)
 		if dialog.Message("%s", prompt).Title("Unrecognized Folder").YesNo() {
-			g := config.Game{
-				GameID:     kg.GameID,
-				WatchPath:  picked,
-				EventsFile: steam.EventsFileName(kg.GameID),
-			}
+			g := steam.GameFromID(kg.GameID, picked)
 			return &g, nil
 		}
 	}

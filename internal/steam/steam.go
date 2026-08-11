@@ -9,7 +9,6 @@ package steam
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,16 +27,16 @@ type KnownGame struct {
 	GameID      string
 	SteamFolder string // folder name under steamapps/common/<SteamFolder>
 	DisplayName string
-	EventsFile  string
 }
 
-// Registry is the MVP known-games table.
+// Registry is the MVP known-games table. It maps Steam folder names to
+// game_ids only — the events-file name follows from game_id
+// (config.EventsFileName), so there is nothing per-game to record here.
 var Registry = []KnownGame{
 	{
 		GameID:      "stardew",
 		SteamFolder: "Stardew Valley",
 		DisplayName: "Stardew Valley",
-		EventsFile:  "lt_stardew_events.jsonl",
 	},
 }
 
@@ -58,19 +57,18 @@ func MatchFolder(folderName string) (KnownGame, bool) {
 // the watch path (see known-games-registry.md — this stops holding for a
 // game like Fallout 4, not yet in scope).
 func GameFromFolder(kg KnownGame, watchPath string) config.Game {
-	return config.Game{
-		GameID:     kg.GameID,
-		WatchPath:  watchPath,
-		EventsFile: kg.EventsFile,
-	}
+	return GameFromID(kg.GameID, watchPath)
 }
 
-// EventsFileName returns the conventional events-file name for a game_id
-// (root CLAUDE.md's JSONL schema convention: lt_<game>_events.jsonl). Used to
-// resolve EventsFile for games sourced from Core's GET /v1/games, which
-// carries only game_id + name — not the file name (client#29 Part B).
-func EventsFileName(gameID string) string {
-	return fmt.Sprintf("lt_%s_events.jsonl", gameID)
+// GameFromID builds a config.Game for any game_id — one from Registry, or one
+// sourced from Core's GET /v1/games, which carries only game_id + name. Both
+// resolve the events-file name the same way, from game_id.
+func GameFromID(gameID, watchPath string) config.Game {
+	return config.Game{
+		GameID:     gameID,
+		WatchPath:  watchPath,
+		EventsFile: config.EventsFileName(gameID),
+	}
 }
 
 // DedupeNew filters discovered down to games whose GameID is not already
