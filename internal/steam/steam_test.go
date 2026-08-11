@@ -43,7 +43,7 @@ func TestMatchFolder(t *testing.T) {
 func TestGameFromFolder(t *testing.T) {
 	t.Parallel()
 
-	kg := KnownGame{GameID: "stardew", SteamFolder: "Stardew Valley", DisplayName: "Stardew Valley", EventsFile: "lt_stardew_events.jsonl"}
+	kg := KnownGame{GameID: "stardew", SteamFolder: "Stardew Valley", DisplayName: "Stardew Valley"}
 	g := GameFromFolder(kg, "/some/watch/path")
 
 	if g.GameID != "stardew" || g.WatchPath != "/some/watch/path" || g.EventsFile != "lt_stardew_events.jsonl" {
@@ -55,8 +55,8 @@ func TestDedupeNew(t *testing.T) {
 	t.Parallel()
 
 	discovered := []config.Game{
-		{GameID: "stardew", WatchPath: "/a", EventsFile: "lt_stardew_events.jsonl"},
-		{GameID: "otherid", WatchPath: "/b", EventsFile: "lt_other_events.jsonl"},
+		{GameID: "stardew", WatchPath: "/a"},
+		{GameID: "otherid", WatchPath: "/b"},
 	}
 
 	t.Run("no overlap: both pass through", func(t *testing.T) {
@@ -69,7 +69,7 @@ func TestDedupeNew(t *testing.T) {
 
 	t.Run("existing already has the game: filtered out", func(t *testing.T) {
 		t.Parallel()
-		existing := []config.Game{{GameID: "stardew", WatchPath: "/existing", EventsFile: "x"}}
+		existing := []config.Game{{GameID: "stardew", WatchPath: "/existing"}}
 		out := DedupeNew(discovered, existing)
 		if len(out) != 1 || out[0].GameID != "otherid" {
 			t.Fatalf("DedupeNew = %+v, want only otherid", out)

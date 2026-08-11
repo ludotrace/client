@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -109,15 +110,26 @@ func (e *Extractor) Extract() error {
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(offset, 0); err != nil {
-		return fmt.Errorf("session: seek: %w", err)
-	}
-
 	fi, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("session: stat: %w", err)
 	}
 	modTime := fi.ModTime()
+
+	// A file shorter than the stored offset was replaced, not appended to —
+	// the mod was reinstalled, the file deleted and recreated, or its name
+	// changed. Seeking past EOF succeeds silently and reads nothing, which
+	// would strand the game forever: no bytes read, so the offset never
+	// advances, so nothing ever uploads again. Restart from zero instead.
+	if fi.Size() < offset {
+		slog.Warn("session: events file shorter than stored offset; restarting from zero",
+			"game_id", e.gameID, "path", e.eventsPath, "size", fi.Size(), "offset", offset)
+		offset = 0
+	}
+
+	if _, err := f.Seek(offset, 0); err != nil {
+		return fmt.Errorf("session: seek: %w", err)
+	}
 
 	scanner := bufio.NewScanner(f)
 	// scanRawLines keeps \r in the token so lineLen is accurate for \r\n files.

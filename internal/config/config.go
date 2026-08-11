@@ -31,9 +31,11 @@ type Config struct {
 }
 
 type Game struct {
-	GameID     string `toml:"game_id"`
-	WatchPath  string `toml:"watch_path"`
-	EventsFile string `toml:"events_file"`
+	GameID    string `toml:"game_id"`
+	WatchPath string `toml:"watch_path"`
+
+	// Derived from GameID, never stored. Always populated by Load().
+	EventsFile string `toml:"-"`
 }
 
 // loadFrom is the internal loader used by Load and tests.
@@ -196,13 +198,20 @@ func validateURL(raw string) error {
 	return nil
 }
 
+// EventsFileName implements the events-file naming rule defined in
+// mod-spec/SPEC.md ("Events File"). Nothing stores the result.
+func EventsFileName(gameID string) string {
+	return fmt.Sprintf("lt_%s_events.jsonl", gameID)
+}
+
 func filterGames(games []Game) []Game {
 	out := games[:0]
 	for _, g := range games {
-		if g.GameID == "" || g.EventsFile == "" {
-			slog.Warn("config: skipping game with missing game_id or events_file", "game", g)
+		if g.GameID == "" {
+			slog.Warn("config: skipping game with missing game_id", "game", g)
 			continue
 		}
+		g.EventsFile = EventsFileName(g.GameID)
 		info, err := os.Stat(g.WatchPath)
 		if err != nil || !info.IsDir() {
 			slog.Warn("config: skipping game with missing or non-directory watch_path",

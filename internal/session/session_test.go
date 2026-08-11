@@ -93,6 +93,39 @@ func TestExtract_OneCompleteSession(t *testing.T) {
 	}
 }
 
+// A replaced events file — mod reinstalled, file deleted and recreated, or
+// renamed — is shorter than the stored offset. Seeking past EOF reads nothing
+// and never advances the offset, so without a size check the game would stop
+// uploading permanently. Extract must restart from zero instead.
+func TestExtract_FileShorterThanOffset_RestartsFromZero(t *testing.T) {
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	offsetPath := filepath.Join(dir, "offset")
+	q := newTestQueue(t)
+
+	// An offset far beyond the end of the fresh file, as if left behind by a
+	// much longer predecessor.
+	if err := os.WriteFile(offsetPath, []byte("999999\n"), 0600); err != nil {
+		t.Fatalf("write offset: %v", err)
+	}
+
+	lines := []string{
+		`{"type":"session_start","session_id":"s1"}`,
+		`{"type":"session_end","session_id":"s1"}`,
+	}
+	writeEvents(t, eventsPath, lines)
+	makeOld(t, eventsPath)
+
+	e := New("fallout4", eventsPath, offsetPath, dir, q)
+	if err := e.Extract(); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	if q.Len() != 1 {
+		t.Fatalf("expected the new file's session to be queued, got %d items", q.Len())
+	}
+}
+
 // TestExtract_InactivityBoundary walks the threshold from both sides: a pause
 // shorter than orphanThreshold leaves the session open, a longer one flushes it.
 func TestExtract_InactivityBoundary(t *testing.T) {
