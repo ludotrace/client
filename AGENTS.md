@@ -21,7 +21,9 @@ detection is the only logic it owns.
 - Extract play sessions and track read position per game via a sidecar offset file
 - Authenticate with Core via browser-based sign-in; store the token in the OS keychain
 - Upload sessions through a durable queue, with the correct `game_id`
-- Delete the temp file and advance the offset **only** on a 202 from Core
+- Retire a session — delete the temp file, advance the offset, drop the queue entry — on a
+  202 from Core, or on a rejection Core will never accept (400, too large). Never on a
+  transient failure
 - Surface state through a tray icon, with Add Game as the primary setup action
 - Run on macOS, Windows, and Linux
 
@@ -89,8 +91,11 @@ complete sessions.
   `orphanThreshold` in `internal/session/session.go` is the single definition of that value —
   the PRD, the architecture spine's AD-2, and the mod scaffolding guide all quote it. Change
   it there and update those together; never add a second place that states the number.
-- **Sidecar offset** at `<config_dir>/offsets/<game_id>.offset`, advanced only on 202. A
-  missing offset restarts from byte 0.
+- **Sidecar offset** at `<config_dir>/offsets/<game_id>.offset`, advanced when a session is
+  retired — on a 202, or on a permanent rejection whose bytes Core will never accept. It only
+  ever moves forward: uploads are served newest-first, so end offsets come back out of order
+  and a rewind would re-extract sessions the pipeline has already finished with. A missing
+  offset restarts from byte 0.
 - **Missing events file** — watch the parent directory, promote to a file watch on CREATE.
 - **Durable queue** — extraction enqueues; a separate worker uploads. The watcher must never
   call upload directly.

@@ -407,6 +407,44 @@ func TestAdvanceOffset_RoundTrip(t *testing.T) {
 	}
 }
 
+// The upload worker retires items newest-first, so it can hand back a lower
+// end offset after a higher one. The high-water mark must hold, or Extract()
+// rewinds and rebuilds sessions the pipeline has already finished with.
+func TestAdvanceOffset_NeverMovesBackwards(t *testing.T) {
+	dir := t.TempDir()
+	offsetPath := filepath.Join(dir, "offset")
+	q := newTestQueue(t)
+
+	e := New("fallout4", filepath.Join(dir, "events.jsonl"), offsetPath, dir, q)
+
+	if err := e.AdvanceOffset(900); err != nil {
+		t.Fatalf("AdvanceOffset(900): %v", err)
+	}
+	for _, older := range []int64{400, 900, 0} {
+		if err := e.AdvanceOffset(older); err != nil {
+			t.Fatalf("AdvanceOffset(%d): %v", older, err)
+		}
+		got, err := e.readOffset()
+		if err != nil {
+			t.Fatalf("readOffset: %v", err)
+		}
+		if got != 900 {
+			t.Fatalf("after AdvanceOffset(%d): offset = %d, want 900", older, got)
+		}
+	}
+
+	if err := e.AdvanceOffset(1200); err != nil {
+		t.Fatalf("AdvanceOffset(1200): %v", err)
+	}
+	got, err := e.readOffset()
+	if err != nil {
+		t.Fatalf("readOffset: %v", err)
+	}
+	if got != 1200 {
+		t.Errorf("offset = %d, want 1200 — a forward advance must still apply", got)
+	}
+}
+
 func TestExtract_MissingEventsFile_NoError(t *testing.T) {
 	dir := t.TempDir()
 	offsetPath := filepath.Join(dir, "offset")

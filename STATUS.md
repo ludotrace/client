@@ -35,7 +35,7 @@ Confirmed by manual end-to-end test or observed running.
 
 **Upload**
 - gzip + streaming multipart POST
-- Response handling, with the offset advanced only on 202
+- Response handling, with the offset advanced on 202
 - Post-202 cleanup of the temp session file
 - 429 limit-reached handling
 
@@ -50,6 +50,8 @@ Confirmed by manual end-to-end test or observed running.
 ## Implemented, not yet validated
 
 - Bounded upload queue — age-based drop-oldest, newest-first upload (#60)
+- Permanent-failure retirement — a 400 or too-large item advances the offset past the rejected region, removes its temp file, and leaves the queue by path (#76)
+- Monotonic offset advancement, so newest-first retirement cannot rewind the read position (#76)
 - Honors Core's `Retry-After` on 429 (#59)
 - Orphan / inactivity flush — closes the final session of a play period
 - Graceful shutdown
