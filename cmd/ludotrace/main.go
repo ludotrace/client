@@ -524,17 +524,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 
 		jobID, traceID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token)
 		if err == nil {
-			if ext, ok := extractors.get(item.GameID); ok {
-				if aerr := ext.AdvanceOffset(item.EndOffset); aerr != nil {
-					slog.Error("failed to advance offset", "game_id", item.GameID, "err", aerr)
-				}
-			}
-			if rerr := os.Remove(item.TmpPath); rerr != nil && !os.IsNotExist(rerr) {
-				slog.Warn("failed to remove temp file", "path", item.TmpPath, "err", rerr)
-			}
-			if rerr := q.Remove(item.TmpPath); rerr != nil {
-				slog.Warn("failed to remove queue item", "err", rerr)
-			}
+			retireItem(q, extractors, item)
 			slog.Info("upload succeeded", "game_id", item.GameID, "job_id", jobID)
 			backoff.reset()
 			t.ResetDropped()
@@ -563,7 +553,11 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		var badReq uploader.ErrBadRequest
 		if errors.Is(err, uploader.ErrFileTooLarge) || errors.As(err, &badReq) {
 			slog.Error("upload failed permanently, dropping item", "game_id", item.GameID, "err", err, "trace_id", traceID)
-			q.Dequeue()
+			// Retire the item exactly as a success does, minus the upload:
+			// Core will never accept these bytes, so the read position has to
+			// move past them. Leaving the offset put means Extract() rebuilds
+			// the same rejected session on the next write event, forever.
+			retireItem(q, extractors, item)
 			// client#64: trace_id in the tray text is the only place a
 			// support case can pick it up without digging through the log.
 			t.SetError(fmt.Sprintf("%s (trace %s)", err.Error(), traceID))
@@ -591,6 +585,28 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			slog.Info("retry requested — resetting backoff")
 			backoff.reset()
 		}
+	}
+}
+
+// retireItem takes an item out of the pipeline for good: advance the game's
+// read position past it, delete its temp file, and drop it from the queue.
+// Both terminal outcomes use this — a 202 and a permanent rejection differ only
+// in whether Core kept the bytes, not in what the client still owes them.
+//
+// Removal is by TmpPath, never positional: the worker selects with PeekNewest,
+// so popping the head would retire a different, innocent item and leave this
+// one in the queue.
+func retireItem(q *queue.Queue, extractors *extractorStore, item queue.Item) {
+	if ext, ok := extractors.get(item.GameID); ok {
+		if aerr := ext.AdvanceOffset(item.EndOffset); aerr != nil {
+			slog.Error("failed to advance offset", "game_id", item.GameID, "err", aerr)
+		}
+	}
+	if rerr := os.Remove(item.TmpPath); rerr != nil && !os.IsNotExist(rerr) {
+		slog.Warn("failed to remove temp file", "path", item.TmpPath, "err", rerr)
+	}
+	if rerr := q.Remove(item.TmpPath); rerr != nil {
+		slog.Warn("failed to remove queue item", "err", rerr)
 	}
 }
 

@@ -60,9 +60,24 @@ func (e *Extractor) readOffset() (int64, error) {
 	return offset, nil
 }
 
+// AdvanceOffset moves the persisted read position forward to offset. It only
+// ever advances: a request to move backwards is a no-op.
+//
+// The upload worker retires items newest-first, so it hands back end offsets
+// out of order — retiring a newer session first, then an older one. Every
+// region below the high-water mark has already been extracted and enqueued, so
+// rewinding to the older item's end offset would have Extract() rebuild and
+// re-enqueue sessions the pipeline is already done with.
 func (e *Extractor) AdvanceOffset(offset int64) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	current, err := e.readOffset()
+	if err != nil {
+		return err
+	}
+	if offset <= current {
+		return nil
+	}
 	return writeOffsetFile(e.offsetPath, offset)
 }
 
