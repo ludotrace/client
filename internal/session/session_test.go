@@ -124,6 +124,42 @@ func TestExtract_FileShorterThanOffset_RestartsFromZero(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("expected the new file's session to be queued, got %d items", q.Len())
 	}
+
+	// The reset has to reach the sidecar, not just this pass's local variable.
+	// AdvanceOffset refuses anything at or below the stored value, so a stale
+	// 999999 would swallow every endOffset the shorter file can report — and
+	// each subsequent pass would rebuild and re-upload the same session, at the
+	// cost of a fresh job and LLM run every time.
+	stored, err := e.readOffset()
+	if err != nil {
+		t.Fatalf("readOffset: %v", err)
+	}
+	if stored != 0 {
+		t.Fatalf("stored offset = %d after the restart, want 0 — the reset never reached disk", stored)
+	}
+
+	// Retire the queued session the way the upload worker does, then extract
+	// again: the offset must have cleared the region and nothing may re-enqueue.
+	item, ok := q.PeekNewest()
+	if !ok {
+		t.Fatal("PeekNewest: queue unexpectedly empty")
+	}
+	if err := e.AdvanceOffset(item.EndOffset); err != nil {
+		t.Fatalf("AdvanceOffset: %v", err)
+	}
+	if err := q.Remove(item.TmpPath); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if got, _ := e.readOffset(); got != item.EndOffset {
+		t.Errorf("offset = %d after retiring the session, want %d", got, item.EndOffset)
+	}
+	if err := e.Extract(); err != nil {
+		t.Fatalf("second Extract: %v", err)
+	}
+	if q.Len() != 0 {
+		t.Errorf("second pass re-enqueued %d item(s) — the same bytes would upload twice", q.Len())
+	}
 }
 
 // TestExtract_InactivityBoundary walks the threshold from both sides: a pause
@@ -442,6 +478,24 @@ func TestAdvanceOffset_NeverMovesBackwards(t *testing.T) {
 	}
 	if got != 1200 {
 		t.Errorf("offset = %d, want 1200 — a forward advance must still apply", got)
+	}
+
+	// The guard compares against the file, never a cached value, so a
+	// hand-edited offset stays authoritative: rewinding it by hand must take
+	// effect and subsequent advances proceed from there. Caching `current` in
+	// memory would pass every assertion above and fail this one.
+	if err := os.WriteFile(offsetPath, []byte("50\n"), 0600); err != nil {
+		t.Fatalf("hand-edit offset file: %v", err)
+	}
+	if err := e.AdvanceOffset(60); err != nil {
+		t.Fatalf("AdvanceOffset(60) after manual rewind: %v", err)
+	}
+	got, err = e.readOffset()
+	if err != nil {
+		t.Fatalf("readOffset: %v", err)
+	}
+	if got != 60 {
+		t.Errorf("offset = %d after a hand rewind then advance, want 60", got)
 	}
 }
 
