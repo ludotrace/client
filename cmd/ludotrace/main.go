@@ -226,6 +226,8 @@ func main() {
 	)
 	t.Run() // blocks until Quit() or systray exit
 	stop()
+
+	flushForShutdown(extractors)
 }
 
 // tolerantTee fans each log record out to every writer, ignoring individual
@@ -522,7 +524,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 
 		t.SetUploading(item.GameID)
 
-		jobID, traceID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token)
+		jobID, traceID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token, item.Capture)
 		if err == nil {
 			retireItem(q, extractors, item)
 			slog.Info("upload succeeded", "game_id", item.GameID, "job_id", jobID)
@@ -672,6 +674,34 @@ func (s *extractorStore) set(gameID string, e *session.Extractor) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.byID[gameID] = e
+}
+
+// all returns a snapshot of the extractors, so a caller can iterate without
+// holding the lock across work that takes one of its own.
+func (s *extractorStore) all() map[string]*session.Extractor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]*session.Extractor, len(s.byID))
+	for id, e := range s.byID {
+		out[id] = e
+	}
+	return out
+}
+
+// flushForShutdown enqueues whatever each game has open as the Client exits,
+// rather than leaving it for an indefinite next launch. Extraction, not upload:
+// the worker is already stopping, so these land in the durable queue and go out
+// on the next run.
+//
+// Best-effort by design — a game that fails to flush is logged and the exit
+// continues. Its bytes are still on disk with the offset unmoved, so the next
+// launch re-reads them.
+func flushForShutdown(extractors *extractorStore) {
+	for gameID, ext := range extractors.all() {
+		if err := ext.FlushForShutdown(); err != nil {
+			slog.Error("shutdown flush failed", "game_id", gameID, "err", err)
+		}
+	}
 }
 
 // makeAddGameHandler composes the Add Game flow: Steam auto-discovery,

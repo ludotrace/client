@@ -48,7 +48,7 @@ func TestUpload_202(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, `{"type":"session_start"}`)
-	jobID, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	jobID, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestUpload_401(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "bad")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "bad", nil)
 	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("got %v, want ErrUnauthorized", err)
 	}
@@ -77,7 +77,7 @@ func TestUpload_413(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("got %v, want ErrFileTooLarge", err)
 	}
@@ -90,7 +90,7 @@ func TestUpload_429(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 	if !errors.Is(err, ErrLimitReached) {
 		t.Fatalf("got %v, want ErrLimitReached", err)
 	}
@@ -104,7 +104,7 @@ func TestUpload_429_RetryAfterDeltaSeconds(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 
 	if !errors.Is(err, ErrLimitReached) {
 		t.Fatalf("got %v, want error wrapping ErrLimitReached", err)
@@ -126,7 +126,7 @@ func TestUpload_429_RetryAfterHTTPDate(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 
 	var lre *LimitReachedError
 	if !errors.As(err, &lre) {
@@ -145,7 +145,7 @@ func TestUpload_429_NoRetryAfterHeader(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 
 	var lre *LimitReachedError
 	if !errors.As(err, &lre) {
@@ -198,7 +198,7 @@ func TestUpload_400(t *testing.T) {
 	defer srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 
 	var badReq ErrBadRequest
 	if !errors.As(err, &badReq) {
@@ -220,7 +220,7 @@ func TestUpload_500_RetriesAndWrapsErrTransient(t *testing.T) {
 
 	filePath := writeTempFile(t, "data")
 	start := time.Now()
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, ErrTransient) {
@@ -241,7 +241,7 @@ func TestUpload_NetworkError_RetriesAndWrapsErrTransient(t *testing.T) {
 	srv.Close()
 
 	filePath := writeTempFile(t, "data")
-	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 
 	if !errors.Is(err, ErrTransient) {
 		t.Fatalf("got %v, want error wrapping ErrTransient", err)
@@ -266,7 +266,7 @@ func TestUpload_ContextCancelDuringBackoff(t *testing.T) {
 		cancel()
 	}()
 
-	_, _, err := Upload(ctx, srv.URL, "fallout4", filePath, "tok")
+	_, _, err := Upload(ctx, srv.URL, "fallout4", filePath, "tok", nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
@@ -325,7 +325,7 @@ func TestUpload_MultipartBodyValid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jobID, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok")
+	jobID, _, err := Upload(context.Background(), srv.URL, "fallout4", filePath, "tok", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ludotrace/client/internal/capture"
 )
 
 type Item struct {
@@ -20,6 +22,13 @@ type Item struct {
 	// so ordering and eviction survive a process restart from queue.json rather
 	// than depending on volatile filesystem mtimes.
 	CapturedAt time.Time `json:"captured_at"`
+	// Capture is how the extractor captured this region (core#116) — sent with
+	// the upload so the model can tell a partial run from a complete one. It is
+	// persisted alongside the item because it describes bytes already written to
+	// the temp file and cannot be recomputed once the events file has moved on.
+	// Nil for an item enqueued before this field existed; the upload then omits
+	// the form field and Core leaves the block out, exactly as before.
+	Capture *capture.Context `json:"capture,omitempty"`
 }
 
 type Queue struct {
