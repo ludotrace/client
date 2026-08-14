@@ -82,7 +82,7 @@ func TestExtract_CarriesForwardOrphanedBytes(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("expected 1 queued item, got %d", q.Len())
 	}
-	item, _ := q.Peek()
+	item := q.Items()[0]
 
 	got := queuedLines(t, item)
 	if len(got) != 4 {
@@ -182,7 +182,7 @@ func TestExtract_ReleasesHoldAtSizeCap(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("expected the oversized hold to be released, got %d queued", q.Len())
 	}
-	item, _ := q.Peek()
+	item := q.Items()[0]
 	if item.Capture == nil {
 		t.Fatal("no capture context on a cap-released hold")
 	}
@@ -212,10 +212,11 @@ func TestExtract_CompleteSessionReportsPresentOpener(t *testing.T) {
 	if err := e.Extract(); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	item, ok := q.Peek()
-	if !ok {
-		t.Fatal("nothing queued")
+	items := q.Items()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 queued item, got %d", len(items))
 	}
+	item := items[0]
 	cc := item.Capture
 	if cc == nil {
 		t.Fatal("no capture context")
@@ -258,7 +259,7 @@ func TestExtract_SupersededSessionReportsSuperseded(t *testing.T) {
 	if q.Len() != 2 {
 		t.Fatalf("expected 2 sessions, got %d", q.Len())
 	}
-	first, _ := q.Peek()
+	first := q.Items()[0]
 	if first.Capture.ClosedBy != capture.ClosedBySuperseded {
 		t.Errorf("first closed_by = %q, want %q", first.Capture.ClosedBy, capture.ClosedBySuperseded)
 	}
@@ -296,7 +297,7 @@ func TestFlushForShutdown(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("shutdown did not flush the open session; queued %d", q.Len())
 	}
-	item, _ := q.Peek()
+	item := q.Items()[0]
 	if item.Capture.ClosedBy != capture.ClosedByClientShutdown {
 		t.Errorf("closed_by = %q, want %q", item.Capture.ClosedBy, capture.ClosedByClientShutdown)
 	}
@@ -328,12 +329,13 @@ func TestFlushForShutdown_DoesNotReleaseHold(t *testing.T) {
 	}
 }
 
-// TestExtract_GapOmittedAcrossGameRestart: Fallout 4's wall_time counts seconds
-// since the game launched, so a relaunch restarts it from zero. The gap across
-// that boundary is genuinely not in the data — real elapsed time between quit
-// and relaunch was never recorded — so it must be omitted rather than reported
-// as zero, which would assert continuity that never happened.
-func TestExtract_GapOmittedAcrossGameRestart(t *testing.T) {
+// TestExtract_GapOmittedAcrossCounterReset. A mod whose wall_time is a counter
+// from an origin it never states — Fallout 4's is seconds since the game
+// launched — restarts that counter when the origin moves, so a later reading
+// comes back smaller. The gap across that point is genuinely not in the data,
+// and must be omitted rather than reported as zero, which would assert
+// continuity that never happened.
+func TestExtract_GapOmittedAcrossCounterReset(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
 	offsetPath := filepath.Join(dir, "offset")
@@ -350,10 +352,11 @@ func TestExtract_GapOmittedAcrossGameRestart(t *testing.T) {
 	if err := e.Extract(); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	item, ok := q.Peek()
-	if !ok {
-		t.Fatal("nothing queued")
+	items := q.Items()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 queued item, got %d", len(items))
 	}
+	item := items[0]
 	if item.Capture.GapBefore != nil {
 		t.Errorf("gap_before = %d across a counter reset; want omitted", *item.Capture.GapBefore)
 	}
@@ -384,10 +387,11 @@ func TestExtract_NumericWallTimeDoesNotDropEvents(t *testing.T) {
 	if err := e.Extract(); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
-	item, ok := q.Peek()
-	if !ok {
-		t.Fatal("nothing queued")
+	items := q.Items()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 queued item, got %d", len(items))
 	}
+	item := items[0]
 	if got := len(queuedLines(t, item)); got != 2 {
 		t.Errorf("uploaded %d events, want 2 — a bare numeric wall_time dropped events", got)
 	}
