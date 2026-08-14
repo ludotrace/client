@@ -150,12 +150,31 @@ added here without the matching Core change fails every upload that sends it.
 Sending no capture context at all is always valid: Core leaves the block out entirely. That
 is what a queue item enqueued before the field existed does.
 
-**Never report a value you did not measure.** `gap_before` is omitted rather than sent as `0`,
-because zero is a reported gap the model may read as a real boundary. This matters because
-`wall_time` is not uniform: the spec asks for an RFC 3339 UTC instant (Stardew emits one), but
-Fallout 4 emits seconds since the game launched, which restarts from zero on relaunch. See
-`internal/session/wallclock.go` — readings of different kinds are never subtracted, and a
-negative delta means a counter reset, not time running backwards.
+### Reading `wall_time`
+
+**`wall_time` is whatever the mod chose to put there.** The capture layer is open, so the
+field arrives in whatever shape a given author could reach from their modding API. The spec
+asks for an ISO 8601 UTC instant, but that is guidance to mod authors, **not a guarantee to
+this code** — treat any strict reading of it as a bug waiting to happen.
+
+`internal/session/wallclock.go` is the single place that interprets it, on one rule:
+**parse generously, interpret narrowly.**
+
+- Accept as many shapes as can be recognized without guessing — separator, precision, and
+  timezone all vary, and none of that changes what a difference means. Add layouts freely.
+- Use only *differences* between two readings, never an absolute value, so an unknown origin
+  or unstated timezone costs nothing.
+- Never subtract readings that are not evidently the same kind. A calendar instant and a bare
+  counter differ by ~9 orders of magnitude; subtracting them yields a confident, meaningless
+  number.
+- When anything is unclear, **report no measurement.** `gap_before` is omitted rather than
+  sent as `0` — zero is a reported gap the model may read as a real boundary, while absent
+  says only that nothing was measured. A negative delta means a counter reset, not time
+  running backwards, so it is declined rather than clamped.
+
+**Do not add heuristics that infer meaning from magnitude** — guessing epoch-vs-counter or
+seconds-vs-milliseconds from how big a number looks. That trades a visible "unknown" for an
+invisible wrong answer, and an unknown is the one this field can afford.
 
 ## Game identity
 
