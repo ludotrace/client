@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ludotrace/client/internal/capture"
 	"github.com/ludotrace/client/internal/tracing"
 )
 
@@ -104,11 +105,22 @@ type errorResponse struct {
 // retries so every attempt shows up on the same trace once Core's OTel
 // pipeline honors the incoming traceparent. Callers surface it on a failed
 // upload so a support case can be correlated against Core's trace.
-func Upload(ctx context.Context, coreURL, gameID, filePath, token string) (string, string, error) {
+//
+// captureCtx is the Client's account of how the region was captured (core#116).
+// A nil Context sends no capture_context field at all, which Core accepts and
+// renders exactly as it did before the field existed.
+func Upload(ctx context.Context, coreURL, gameID, filePath, token string, captureCtx *capture.Context) (string, string, error) {
 	backoffs := []time.Duration{0, 200 * time.Millisecond, 400 * time.Millisecond}
 
-	traceID, err := tracing.NewTraceID()
+	// Encoded once, outside the retry loop: every attempt must send byte-identical
+	// capture context, and an encoding failure is permanent, not transient.
+	encodedCapture, err := capture.Encode(captureCtx)
 	if err != nil {
+		return "", "", fmt.Errorf("uploader: encode capture context: %w", err)
+	}
+
+	traceID, terr := tracing.NewTraceID()
+	if terr != nil {
 		// Best-effort: tracing must never block an upload. An empty traceID
 		// just means doUpload skips the traceparent header for this call.
 		traceID = ""
@@ -126,7 +138,7 @@ func Upload(ctx context.Context, coreURL, gameID, filePath, token string) (strin
 			}
 		}
 
-		jobID, err := doUpload(ctx, coreURL, gameID, filePath, token, traceID)
+		jobID, err := doUpload(ctx, coreURL, gameID, filePath, token, traceID, encodedCapture)
 		if err == nil {
 			return jobID, traceID, nil
 		}
@@ -158,7 +170,7 @@ func isTransient(err error) bool {
 	return true
 }
 
-func doUpload(ctx context.Context, coreURL, gameID, filePath, token, traceID string) (string, error) {
+func doUpload(ctx context.Context, coreURL, gameID, filePath, token, traceID string, encodedCapture []byte) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return "", err
@@ -182,6 +194,14 @@ func doUpload(ctx context.Context, coreURL, gameID, filePath, token, traceID str
 
 		if writeErr = mw.WriteField("game_id", gameID); writeErr != nil {
 			return
+		}
+
+		// Written before the file part so Core's ParseMultipartForm sees it
+		// without buffering the whole upload first.
+		if len(encodedCapture) > 0 {
+			if writeErr = mw.WriteField("capture_context", string(encodedCapture)); writeErr != nil {
+				return
+			}
 		}
 
 		h := make(textproto.MIMEHeader)

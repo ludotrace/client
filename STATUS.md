@@ -55,6 +55,9 @@ Confirmed by manual end-to-end test or observed running.
 - Replaced-events-file restart, persisted to the sidecar so the monotonic guard cannot strand it (#77)
 - Honors Core's `Retry-After` on 429 (#59)
 - Orphan / inactivity flush — closes the final session of a play period
+- Shutdown flush — an open session is extracted and enqueued as the client exits (#75)
+- Carry-forward — bytes with no opener are held with the offset unmoved and prepended to the next session as its lead-in, released on gaining a `session_start` or exceeding a 4 MiB hold cap (#75)
+- Capture context on upload — `opener`, `closed_by`, `gap_before`, `event_count`, `span_s`, validated by Core against a closed enum (#75, core#116)
 - Graceful shutdown
 - Transient-failure backoff and queued state for offline handling
 - Launch heartbeat splash (#51)

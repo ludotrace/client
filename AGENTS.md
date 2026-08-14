@@ -91,6 +91,30 @@ complete sessions.
   `orphanThreshold` in `internal/session/session.go` is the single definition of that value —
   the PRD, the architecture spine's AD-2, and the mod scaffolding guide all quote it. Change
   it there and update those together; never add a second place that states the number.
+- **Client shutdown** is the second closing boundary: an open session is extracted and
+  enqueued as the Client exits, rather than left for an indefinite next launch. Extraction
+  only — the upload worker is already stopping, so it goes out on the next run.
+
+  These two are the *only* boundary signals, and deliberately so. The sharper alternative is
+  observing the game process, which means enumerating the process table from a background
+  tray app — outside the configured watch path, hard to state honestly in a privacy policy,
+  and awkward for antivirus heuristics. Carry-forward makes the extra precision unnecessary.
+- **Carry-forward.** Bytes that arrive with no session open — the region between the offset
+  and the first `session_start` — **are not a session and never become one on their own.**
+  A flush leaves them behind whenever the player resumes after it fired: their opener is
+  already uploaded, so the region has none.
+
+  They are **held**, with the offset unmoved, and prepended to the next session as its
+  lead-in. Holding is close to lossless: the bytes stay on disk and nothing depends on the
+  Client surviving. Never upload a held fragment on its own to "not lose it" — it is not a
+  candidate for its own insight, so it would spend an inference run on something the model
+  cannot place.
+
+  A hold is released only when it **gains an opener** (a `session_start` arrives — upload it
+  with the held bytes attached, in place, as one contiguous region) or when it **exceeds
+  `holdCap`** (4 MiB raw), so it cannot grow without bound. No minimum-event floor and no
+  age-based expiry: a flat floor cannot work, because the same two minutes may be dense or
+  empty depending on the game and the Client cannot tell.
 - **Sidecar offset** at `<config_dir>/offsets/<game_id>.offset`, advanced when a session is
   retired — on a 202, or on a permanent rejection whose bytes Core will never accept. It only
   ever moves forward: uploads are served newest-first, so end offsets come back out of order
@@ -105,6 +129,52 @@ complete sessions.
 - **Missing events file** — watch the parent directory, promote to a file watch on CREATE.
 - **Durable queue** — extraction enqueues; a separate worker uploads. The watcher must never
   call upload directly.
+
+## Capture context
+
+Every upload carries a `capture_context` form field describing *how* the region was captured,
+so the model can say "the opening of this run is missing" instead of hedging (core#116).
+`internal/capture` holds the shape; `internal/session` fills it in.
+
+| Field | Meaning |
+|---|---|
+| `opener` | `present` / `absent` — is the `session_start` that began this run inside the upload? |
+| `closed_by` | `superseded`, `idle_timeout`, `client_shutdown`, `size_cap` |
+| `gap_before` | Seconds of idle between a carried-forward lead-in and the session it leads into. Omitted when there is no lead-in, **and when the gap cannot be measured** |
+| `event_count`, `span_s` | What the Client counted over the region it uploaded |
+
+**The enums are a contract with `core/internal/capture`.** Core validates every value and
+rejects the whole upload on anything off-enum, non-integer, partial, or unknown — so a value
+added here without the matching Core change fails every upload that sends it.
+
+Sending no capture context at all is always valid: Core leaves the block out entirely. That
+is what a queue item enqueued before the field existed does.
+
+### Reading `wall_time`
+
+**`wall_time` is whatever the mod chose to put there.** The capture layer is open, so the
+field arrives in whatever shape a given author could reach from their modding API. The spec
+asks for an ISO 8601 UTC instant, but that is guidance to mod authors, **not a guarantee to
+this code** — treat any strict reading of it as a bug waiting to happen.
+
+`internal/session/wallclock.go` is the single place that interprets it, on one rule:
+**parse generously, interpret narrowly.**
+
+- Accept as many shapes as can be recognized without guessing — separator, precision, and
+  timezone all vary, and none of that changes what a difference means. Add layouts freely.
+- Use only *differences* between two readings, never an absolute value, so an unknown origin
+  or unstated timezone costs nothing.
+- Never subtract readings that are not evidently the same kind. A calendar instant and a bare
+  counter differ by ~9 orders of magnitude; subtracting them yields a confident, meaningless
+  number.
+- When anything is unclear, **report no measurement.** `gap_before` is omitted rather than
+  sent as `0` — zero is a reported gap the model may read as a real boundary, while absent
+  says only that nothing was measured. A negative delta means a counter reset, not time
+  running backwards, so it is declined rather than clamped.
+
+**Do not add heuristics that infer meaning from magnitude** — guessing epoch-vs-counter or
+seconds-vs-milliseconds from how big a number looks. That trades a visible "unknown" for an
+invisible wrong answer, and an unknown is the one this field can afford.
 
 ## Game identity
 

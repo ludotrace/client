@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ludotrace/client/internal/capture"
 	"github.com/ludotrace/client/internal/queue"
 )
 
@@ -20,6 +21,13 @@ import (
 // session is treated as finished. It is the single source of truth for the
 // inactivity boundary; the docs describe this value, not a separate one.
 const orphanThreshold = 12 * time.Minute
+
+// holdCap bounds the carried-forward lead-in (see Extract). Held bytes are not
+// a session and are waiting for one, so nothing else would ever release them;
+// this is what stops a run that never emits another session_start from holding
+// without limit. It is a raw-bytes figure and uploads are gzipped, so it stays
+// far clear of Core's 5 MiB body limit.
+const holdCap = 4 << 20
 
 type Extractor struct {
 	gameID     string
@@ -102,20 +110,87 @@ func writeOffsetFile(path string, offset int64) error {
 }
 
 type eventEnvelope struct {
-	Type string `json:"type"`
+	Type     string          `json:"type"`
+	WallTime json.RawMessage `json:"wall_time"`
 }
 
+// openSession is a region of the events file being accumulated for one upload.
+// Alongside the bytes it tracks what Core's capture context needs (core#116):
+// how many events went in, how much play time they span, and — once the region
+// is closed — whether its opening session_start is inside it.
 type openSession struct {
 	lines [][]byte
+	bytes int
+
+	// opener is set when the region is created, from whether it began at a
+	// session_start or at carried-forward bytes.
+	opener string
+	// gapBefore is the idle between a carried-forward lead-in and the session
+	// it leads into. Nil unless this region has a lead-in and the gap was
+	// measurable.
+	gapBefore *int
+
+	// last is the most recent parseable wall_time seen, and spanS the sum of
+	// the forward steps between consecutive readings. Summing steps rather
+	// than subtracting first from last keeps the span honest across a game
+	// restart, where a relative counter resets and the raw difference goes
+	// negative.
+	last  wallClock
+	spanS int
 }
 
-func (s *openSession) append(rawJSON []byte) {
+func (s *openSession) append(rawJSON []byte, clock wallClock) {
 	lineCopy := make([]byte, len(rawJSON))
 	copy(lineCopy, rawJSON)
 	s.lines = append(s.lines, lineCopy)
+	s.bytes += len(lineCopy) + 1 // +1 for the newline writeAndEnqueue adds
+
+	if clock.kind == clockNone {
+		return
+	}
+	if d, ok := delta(s.last, clock); ok {
+		s.spanS += d
+	}
+	s.last = clock
 }
 
-func (e *Extractor) Extract() error {
+// leadInto turns a held lead-in into the opening of the session starting at
+// clock. The held bytes keep their position at the front of the region — they
+// are the same contiguous run of the file — and the region as a whole reports
+// no opener, because the session_start that began the held bytes was flushed in
+// an earlier upload.
+func (s *openSession) leadInto(clock wallClock) {
+	s.opener = capture.OpenerAbsent
+	if d, ok := delta(s.last, clock); ok {
+		s.gapBefore = &d
+	}
+}
+
+// captureContext reports how the region was captured, given what closed it.
+func (s *openSession) captureContext(closedBy string) *capture.Context {
+	return &capture.Context{
+		Opener:     s.opener,
+		ClosedBy:   closedBy,
+		GapBefore:  s.gapBefore,
+		EventCount: len(s.lines),
+		SpanS:      s.spanS,
+	}
+}
+
+// Extract reads everything appended since the stored offset and enqueues
+// whatever complete sessions it finds.
+func (e *Extractor) Extract() error { return e.extract(false) }
+
+// FlushForShutdown is Extract with the Client's own exit as a closing boundary:
+// an open session is enqueued rather than left for an indefinite next launch.
+// It is the Client's lifecycle, not observation of the game.
+//
+// A held lead-in is deliberately *not* released here. Shutdown says nothing
+// about whether those bytes will gain an opener — they keep their place on
+// disk with the offset unmoved, and the next launch picks them up unchanged.
+func (e *Extractor) FlushForShutdown() error { return e.extract(true) }
+
+func (e *Extractor) extract(shutdown bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -169,6 +244,20 @@ func (e *Extractor) Extract() error {
 	scanner.Split(scanRawLines)
 
 	var current *openSession
+
+	// leadIn holds bytes that arrived with no session open — the region between
+	// the stored offset and the first session_start. They are not a session and
+	// never become one on their own: an earlier flush already uploaded their
+	// opener, so uploading them alone would spend an inference run on a
+	// fragment the model cannot place. They are held instead, with the offset
+	// unmoved so they stay on disk and survive a restart, and are prepended to
+	// the next session as its lead-in.
+	//
+	// Before this, such bytes were discarded outright (ludotrace/client#75): the
+	// offset only advances on a successful upload, so a run whose opener had
+	// been flushed by the inactivity timeout could never upload anything again.
+	var leadIn *openSession
+
 	curOffset := offset // tracks byte position as we read
 
 	for scanner.Scan() {
@@ -182,6 +271,7 @@ func (e *Extractor) Extract() error {
 			curOffset += lineLen
 			continue
 		}
+		clock := parseWallTime(env.WallTime)
 
 		// The Client recognises exactly one structural boundary marker —
 		// session_start — plus the inactivity timeout below. Everything else,
@@ -197,14 +287,30 @@ func (e *Extractor) Extract() error {
 			// the game was reloaded. Flush it (rather than discard it) up to the
 			// byte where this session_start begins, then open the new one.
 			if current != nil {
-				if err := e.writeAndEnqueue(current, curOffset); err != nil {
+				if err := e.writeAndEnqueue(current, curOffset, capture.ClosedBySuperseded); err != nil {
 					return err
 				}
+				current = nil
 			}
-			current = &openSession{}
-			current.append(rawJSON)
+
+			// A held lead-in has just gained the session it leads into. It is
+			// released as that session's opening bytes, in place: one
+			// contiguous region from the offset, uploaded as one unit.
+			if leadIn != nil {
+				current = leadIn
+				current.leadInto(clock)
+				leadIn = nil
+			} else {
+				current = &openSession{opener: capture.OpenerPresent}
+			}
+			current.append(rawJSON, clock)
 		} else if current != nil {
-			current.append(rawJSON)
+			current.append(rawJSON, clock)
+		} else {
+			if leadIn == nil {
+				leadIn = &openSession{opener: capture.OpenerAbsent}
+			}
+			leadIn.append(rawJSON, clock)
 		}
 
 		curOffset += lineLen
@@ -214,13 +320,41 @@ func (e *Extractor) Extract() error {
 		return fmt.Errorf("session: scan: %w", err)
 	}
 
-	// Inactivity boundary: an open session whose events file hasn't been
-	// modified in >orphanThreshold is treated as finished and flushed. This is
-	// the generic "the player stopped" signal — it is what closes the final
-	// session of a play period, including one that ended without a clean
-	// session_end (e.g. a crash or a quit with no final save).
-	if current != nil && time.Since(modTime) > orphanThreshold {
-		if err := e.writeAndEnqueue(current, curOffset); err != nil {
+	// Two closing boundaries, both from what the Client already knows.
+	//
+	// Inactivity: the events file hasn't been modified in >orphanThreshold, the
+	// generic "the player stopped" signal. It is what closes the final session
+	// of a play period, including one that ended without a clean session_end
+	// (e.g. a crash or a quit with no final save).
+	//
+	// Shutdown: the Client is exiting, so what is coherent now is enqueued now.
+	if current != nil {
+		switch {
+		case shutdown:
+			if err := e.writeAndEnqueue(current, curOffset, capture.ClosedByClientShutdown); err != nil {
+				return err
+			}
+		case time.Since(modTime) > orphanThreshold:
+			if err := e.writeAndEnqueue(current, curOffset, capture.ClosedByIdleTimeout); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Nothing opened a session over the whole region, so everything read is
+	// held. Holding is close to lossless — the bytes stay on disk and the offset
+	// does not move — but it cannot grow without bound, so a hold past holdCap
+	// is released on its own.
+	//
+	// It is released rather than dropped: a fragment that large is
+	// unambiguously substantial, which is what makes it worth an inference run
+	// where a two-minute one would not be. It is cut mid-play, so it reports
+	// size_cap and never the inactivity or shutdown closers.
+	if leadIn != nil && leadIn.bytes > holdCap {
+		slog.Info("session: releasing carried-forward lead-in at hold cap",
+			"game_id", e.gameID, "bytes", leadIn.bytes, "events", len(leadIn.lines))
+		if err := e.writeAndEnqueue(leadIn, curOffset, capture.ClosedBySizeCap); err != nil {
 			return err
 		}
 	}
@@ -228,7 +362,7 @@ func (e *Extractor) Extract() error {
 	return nil
 }
 
-func (e *Extractor) writeAndEnqueue(sess *openSession, endOffset int64) error {
+func (e *Extractor) writeAndEnqueue(sess *openSession, endOffset int64, closedBy string) error {
 	tmpFile, err := os.CreateTemp(e.tempDir, "lt_session_*.jsonl")
 	if err != nil {
 		return fmt.Errorf("session: create temp: %w", err)
@@ -263,6 +397,7 @@ func (e *Extractor) writeAndEnqueue(sess *openSession, endOffset int64) error {
 		TmpPath:    tmpPath,
 		EndOffset:  endOffset,
 		CapturedAt: time.Now(),
+		Capture:    sess.captureContext(closedBy),
 	})
 }
 
