@@ -3,6 +3,7 @@ package queue
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -89,13 +90,15 @@ func (q *Queue) Enqueue(item Item) error {
 	return q.flush()
 }
 
-func (q *Queue) Peek() (Item, bool) {
+// Items returns a snapshot of the queued items in arrival order (oldest
+// enqueued first). The returned slice is a copy: mutating it does not affect
+// the queue. It exists for inspection — tests and diagnostics — not for
+// selecting work: the upload worker selects with PeekNewest and retires by
+// TmpPath (Remove), never positionally.
+func (q *Queue) Items() []Item {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.items) == 0 {
-		return Item{}, false
-	}
-	return q.items[0], true
+	return slices.Clone(q.items)
 }
 
 // PeekNewest returns the item with the most recent CapturedAt without removing
@@ -156,22 +159,6 @@ func (q *Queue) EvictExpired(maxAge time.Duration, now time.Time) ([]Item, error
 		return nil, err
 	}
 	return expired, nil
-}
-
-func (q *Queue) Dequeue() (Item, bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.items) == 0 {
-		return Item{}, false
-	}
-	item := q.items[0]
-	q.items = q.items[1:]
-	if err := q.flush(); err != nil {
-		// re-insert to keep in-memory state consistent with what caller expects
-		q.items = append([]Item{item}, q.items...)
-		return Item{}, false
-	}
-	return item, true
 }
 
 func (q *Queue) Contains(tmpPath string) bool {
