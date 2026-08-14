@@ -22,7 +22,7 @@ func TestNewEmptyOnMissingFile(t *testing.T) {
 	}
 }
 
-func TestEnqueueDequeueFIFO(t *testing.T) {
+func TestEnqueueArrivalOrder(t *testing.T) {
 	q, _ := New(queuePath(t))
 	items := []Item{
 		{GameID: "g1", TmpPath: "/tmp/a"},
@@ -37,46 +37,35 @@ func TestEnqueueDequeueFIFO(t *testing.T) {
 	if q.Len() != 3 {
 		t.Fatalf("expected 3, got %d", q.Len())
 	}
+	got := q.Items()
 	for i, want := range items {
-		got, ok := q.Dequeue()
-		if !ok {
-			t.Fatalf("item %d: Dequeue returned false", i)
+		if got[i].TmpPath != want.TmpPath {
+			t.Errorf("item %d: got %q, want %q", i, got[i].TmpPath, want.TmpPath)
 		}
-		if got.TmpPath != want.TmpPath {
-			t.Errorf("item %d: got %q, want %q", i, got.TmpPath, want.TmpPath)
-		}
-	}
-	if q.Len() != 0 {
-		t.Fatalf("expected empty queue after draining, got %d", q.Len())
 	}
 }
 
-func TestPeekDoesNotRemove(t *testing.T) {
+func TestItemsReturnsCopy(t *testing.T) {
 	q, _ := New(queuePath(t))
 	_ = q.Enqueue(Item{TmpPath: "/tmp/x"})
 
-	got, ok := q.Peek()
-	if !ok || got.TmpPath != "/tmp/x" {
-		t.Fatalf("unexpected peek result: %v %v", got, ok)
+	got := q.Items()
+	if len(got) != 1 || got[0].TmpPath != "/tmp/x" {
+		t.Fatalf("unexpected snapshot: %v", got)
+	}
+	got[0].TmpPath = "/tmp/mutated"
+	if q.Items()[0].TmpPath != "/tmp/x" {
+		t.Error("mutating the snapshot changed the queue")
 	}
 	if q.Len() != 1 {
-		t.Fatalf("Peek removed item; Len=%d", q.Len())
+		t.Fatalf("Items removed an item; Len=%d", q.Len())
 	}
 }
 
-func TestPeekEmptyQueue(t *testing.T) {
+func TestItemsEmptyQueue(t *testing.T) {
 	q, _ := New(queuePath(t))
-	_, ok := q.Peek()
-	if ok {
-		t.Fatal("expected false from Peek on empty queue")
-	}
-}
-
-func TestDequeueEmptyQueue(t *testing.T) {
-	q, _ := New(queuePath(t))
-	_, ok := q.Dequeue()
-	if ok {
-		t.Fatal("expected false from Dequeue on empty queue")
+	if got := q.Items(); len(got) != 0 {
+		t.Fatalf("expected no items on empty queue, got %v", got)
 	}
 }
 
@@ -104,15 +93,13 @@ func TestUpdateAttempts(t *testing.T) {
 		t.Fatalf("UpdateAttempts: %v", err)
 	}
 
-	item, _ := q.Peek()
-	if item.Attempts != 2 {
+	if item := q.Items()[0]; item.Attempts != 2 {
 		t.Errorf("expected Attempts=2, got %d", item.Attempts)
 	}
 
 	// reload to confirm flush
 	q2, _ := New(path)
-	item2, _ := q2.Peek()
-	if item2.Attempts != 2 {
+	if item2 := q2.Items()[0]; item2.Attempts != 2 {
 		t.Errorf("persisted Attempts: expected 2, got %d", item2.Attempts)
 	}
 }
@@ -142,13 +129,8 @@ func TestRemoveByTmpPath(t *testing.T) {
 	}
 
 	// verify order preserved
-	first, _ := q.Dequeue()
-	if first.TmpPath != "/tmp/a" {
-		t.Errorf("expected /tmp/a, got %s", first.TmpPath)
-	}
-	second, _ := q.Dequeue()
-	if second.TmpPath != "/tmp/c" {
-		t.Errorf("expected /tmp/c, got %s", second.TmpPath)
+	if got := tmpPaths(q.Items()); got[0] != "/tmp/a" || got[1] != "/tmp/c" {
+		t.Errorf("expected [/tmp/a /tmp/c], got %v", got)
 	}
 }
 
@@ -177,7 +159,7 @@ func TestPersistence(t *testing.T) {
 	if q2.Len() != 2 {
 		t.Fatalf("expected 2 items after reload, got %d", q2.Len())
 	}
-	item, _ := q2.Dequeue()
+	item := q2.Items()[0]
 	if item.TmpPath != "/tmp/sess1" || item.EndOffset != 42 || item.Attempts != 1 {
 		t.Errorf("reloaded item mismatch: %+v", item)
 	}

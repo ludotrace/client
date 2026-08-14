@@ -72,10 +72,7 @@ func TestExtract_OneCompleteSession(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("expected 1 queued item, got %d", q.Len())
 	}
-	item, ok := q.Peek()
-	if !ok {
-		t.Fatal("Peek returned false")
-	}
+	item := q.Items()[0]
 	if item.GameID != "fallout4" {
 		t.Errorf("GameID = %q, want %q", item.GameID, "fallout4")
 	}
@@ -269,7 +266,7 @@ func TestExtract_SessionEndContinuesSession(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("expected 1 queued item, got %d", q.Len())
 	}
-	item, _ := q.Peek()
+	item := q.Items()[0]
 	data, err := os.ReadFile(item.TmpPath)
 	if err != nil {
 		t.Fatalf("read temp file: %v", err)
@@ -308,7 +305,7 @@ func TestExtract_NewSessionFlushesUnclosedPrior(t *testing.T) {
 	if q.Len() != 2 {
 		t.Fatalf("expected 2 queued items (s1 flushed by s2 start, s2 by inactivity), got %d", q.Len())
 	}
-	first, _ := q.Peek()
+	first := q.Items()[0]
 	data, err := os.ReadFile(first.TmpPath)
 	if err != nil {
 		t.Fatalf("read temp file: %v", err)
@@ -366,7 +363,7 @@ func TestExtract_OrphanSession_OldModTime(t *testing.T) {
 	if q.Len() != 1 {
 		t.Errorf("expected 1 orphan queued, got %d", q.Len())
 	}
-	item, _ := q.Peek()
+	item := q.Items()[0]
 	if item.GameID != "fallout4" {
 		t.Errorf("orphan GameID = %q, want %q", item.GameID, "fallout4")
 	}
@@ -410,7 +407,7 @@ func TestExtract_ReadsFromPersistedOffset(t *testing.T) {
 	if q.Len() != 1 {
 		t.Fatalf("expected 1 item (s2 only), got %d", q.Len())
 	}
-	item, _ := q.Peek()
+	item := q.Items()[0]
 
 	data, err := os.ReadFile(item.TmpPath)
 	if err != nil {

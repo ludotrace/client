@@ -56,10 +56,8 @@ func TestEvictExpired_DropsOldestFirst(t *testing.T) {
 		t.Fatalf("remaining = %d, want 2", q.Len())
 	}
 	// Survivors keep their relative arrival order.
-	first, _ := q.Dequeue()
-	second, _ := q.Dequeue()
-	if first.TmpPath != "/tmp/fresh" || second.TmpPath != "/tmp/edge" {
-		t.Errorf("survivor order = [%s %s], want [/tmp/fresh /tmp/edge]", first.TmpPath, second.TmpPath)
+	if got := tmpPaths(q.Items()); got[0] != "/tmp/fresh" || got[1] != "/tmp/edge" {
+		t.Errorf("survivor order = %v, want [/tmp/fresh /tmp/edge]", got)
 	}
 }
 
@@ -205,11 +203,11 @@ func TestBackfillLegacyTimestamps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New on legacy file: %v", err)
 	}
-	item, ok := q.Peek()
-	if !ok {
-		t.Fatal("legacy item missing after load")
+	loaded := q.Items()
+	if len(loaded) != 1 {
+		t.Fatalf("legacy item missing after load: %v", tmpPaths(loaded))
 	}
-	if item.CapturedAt.IsZero() {
+	if loaded[0].CapturedAt.IsZero() {
 		t.Error("legacy item CapturedAt not backfilled")
 	}
 
