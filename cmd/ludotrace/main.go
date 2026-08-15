@@ -471,30 +471,21 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		}
 	}
 
-	// waitForSignIn parks until there is a reason to re-check auth: the tray
-	// reports a usable session, the user clicks Retry Now, or the fallback
-	// timer expires. Same contract as wait — false means ctx was cancelled and
-	// the caller should return.
+	// waitForSignIn blocks until there is a reason to re-check auth: the tray
+	// reports a usable session, or the user clicks Retry Now. No timer — the
+	// only writer of a token is auth.SignIn, and its only caller is the tray
+	// handler that sends the signal, so a wake cannot be missed and a fallback
+	// poll would have nothing to find. Anything that later obtains a token by
+	// another route must signal it. Same contract as wait: false means ctx was
+	// cancelled and the caller should return.
 	waitForSignIn := func() bool {
-		timer.Reset(notSignedInFallbackWait)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
 			return false
-		case <-timer.C:
-			return true
 		case <-signedInCh:
-			if !timer.Stop() {
-				<-timer.C
-			}
 			slog.Info("signed in — resuming uploads")
 			return true
 		case <-retryCh:
-			if !timer.Stop() {
-				<-timer.C
-			}
 			return true
 		}
 	}
@@ -667,13 +658,6 @@ const (
 	// HTTP-date form) must not park the worker effectively forever; a 24h
 	// ceiling bounds the wait so we re-check at least daily regardless.
 	limitReachedMaxWait = 24 * time.Hour
-	// notSignedInFallbackWait bounds how long the worker parks while signed
-	// out. The wake that matters is the tray's signed-in signal, not this
-	// timer — sign-in is a user action this process handles itself, so there
-	// is nothing to poll for. The fallback only covers a token becoming valid
-	// by some path the tray does not originate (a keychain repopulated out of
-	// band, say), which is why it is minutes rather than seconds.
-	notSignedInFallbackWait = 15 * time.Minute
 )
 
 // limitReachedWait decides how long to wait after a 429 upload_limit_reached.
