@@ -27,13 +27,13 @@ func (a *signedOutAuth) SignIn(context.Context) error  { return nil }
 func (a *signedOutAuth) SignOut(context.Context) error { return nil }
 func (a *signedOutAuth) IsSignedIn() bool              { return false }
 
-// A signed-out worker with a non-empty queue parks on the tray's signed-in
-// signal instead of re-asking on a timer, so it must ask exactly once. The park
-// is now minutes long, which makes ctx cancellation the only thing that can
-// still stop it promptly — a plain sleep here would hang shutdown for the whole
-// fallback interval. goleak (TestMain) fails the test if the worker never
-// returns at all.
-func TestRunUploadWorker_SignedOutParksAndStillCancels(t *testing.T) {
+// A signed-out worker with a non-empty queue blocks: it asks for a token once
+// and then waits, rather than spinning the loop (and with it EvictExpired, and
+// the queue file) against an answer that cannot change without an event. It
+// must stay interruptible while blocked — the wait is minutes long, so ctx is
+// the only thing that can stop it promptly, and goleak (TestMain) fails the
+// test if it never returns at all.
+func TestRunUploadWorker_SignedOutBlocksAndStaysInterruptible(t *testing.T) {
 	dir := t.TempDir()
 
 	q, err := queue.New(filepath.Join(dir, "queue.json"))
@@ -58,24 +58,20 @@ func TestRunUploadWorker_SignedOutParksAndStillCancels(t *testing.T) {
 		runUploadWorker(ctx, cfg, a, q, newExtractorStore(), tr)
 	}()
 
-	// The call count only means something past the longest interval a polling
-	// implementation could plausibly use — a shorter window cannot tell
-	// "parked" apart from "sleeping, about to re-ask". Under -short, settle for
-	// the cancellation half of the assertion.
-	settle := 11 * time.Second
-	if testing.Short() {
-		settle = 200 * time.Millisecond
-	}
+	const settle = 200 * time.Millisecond
 	time.Sleep(settle)
 	cancel()
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("worker did not return within 2s of cancellation — parked past ctx")
+		t.Fatal("worker did not return within 2s of cancellation — blocked past ctx")
 	}
 
+	// One ask, then blocked. This catches a branch that loops without waiting
+	// at all; it deliberately does not try to pin the wait's length, which
+	// would only encode whatever constant the fallback happens to use today.
 	if got := a.calls.Load(); got != 1 {
-		t.Errorf("GetToken called %d times in %v while signed out, want 1 (no polling)", got, settle)
+		t.Errorf("GetToken called %d times in %v while signed out, want 1", got, settle)
 	}
 }
