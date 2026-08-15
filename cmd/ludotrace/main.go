@@ -438,6 +438,13 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors *extractorStore, t *tray.Tray) {
 	var backoff uploadBackoff
 	retryCh := t.RetryCh()
+	signedInCh := t.SignedInCh()
+
+	// True while the loop is parked on the not-signed-in branch. Entering that
+	// state is the event worth a log line; sitting in it — possibly for days —
+	// is not, so the log happens on the transition only and is armed again by
+	// the next successful GetToken.
+	notSignedIn := false
 
 	// A single reusable timer for all backoff/retry delays in this loop,
 	// rather than a fresh time.After per branch — under rapid repeated
@@ -460,6 +467,34 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			}
 			return false
 		case <-timer.C:
+			return true
+		}
+	}
+
+	// waitForSignIn parks until there is a reason to re-check auth: the tray
+	// reports a usable session, the user clicks Retry Now, or the fallback
+	// timer expires. Same contract as wait — false means ctx was cancelled and
+	// the caller should return.
+	waitForSignIn := func() bool {
+		timer.Reset(notSignedInFallbackWait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return false
+		case <-timer.C:
+			return true
+		case <-signedInCh:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			slog.Info("signed in — resuming uploads")
+			return true
+		case <-retryCh:
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return true
 		}
 	}
@@ -510,7 +545,12 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if err != nil {
 			if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, auth.ErrTokenRevoked) {
 				t.SetState(tray.StateNotAuth)
-				if !wait(10 * time.Second) {
+				if !notSignedIn {
+					notSignedIn = true
+					slog.Warn("not signed in — uploads paused until sign-in",
+						"queued", q.Len(), "err", err)
+				}
+				if !waitForSignIn() {
 					return
 				}
 				continue
@@ -521,6 +561,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			}
 			continue
 		}
+		notSignedIn = false
 
 		t.SetUploading(item.GameID)
 
@@ -626,6 +667,13 @@ const (
 	// HTTP-date form) must not park the worker effectively forever; a 24h
 	// ceiling bounds the wait so we re-check at least daily regardless.
 	limitReachedMaxWait = 24 * time.Hour
+	// notSignedInFallbackWait bounds how long the worker parks while signed
+	// out. The wake that matters is the tray's signed-in signal, not this
+	// timer — sign-in is a user action this process handles itself, so there
+	// is nothing to poll for. The fallback only covers a token becoming valid
+	// by some path the tray does not originate (a keychain repopulated out of
+	// band, say), which is why it is minutes rather than seconds.
+	notSignedInFallbackWait = 15 * time.Minute
 )
 
 // limitReachedWait decides how long to wait after a 429 upload_limit_reached.
