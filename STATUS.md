@@ -61,6 +61,7 @@ Confirmed by manual end-to-end test or observed running.
 - Graceful shutdown
 - Transient-failure backoff and queued state for offline handling
 - Launch heartbeat splash (#51)
+- Update swap hardening — waits on the parent PID, retries the rename past a Windows sharing violation, relaunches the previous version if the swap fails, and logs to file from the start of `--finish-update` (#83)
 - W3C traceparent propagation (#64, narrow slice)
 
 ---
