@@ -50,6 +50,7 @@ type Tray struct {
 	uploadingGame string
 	droppedCount  int
 	retryCh       chan struct{}
+	signedInCh    chan struct{}
 
 	updateCh          chan updateNote
 	pendingRestartFn  func(pendingPath string)
@@ -73,14 +74,15 @@ func (t *Tray) SetHasGames(v bool) {
 
 func New(a auth.Client, q *queue.Queue, coreURL, appURL, version string) *Tray {
 	return &Tray{
-		auth:     a,
-		q:        q,
-		coreURL:  coreURL,
-		appURL:   appURL,
-		version:  version,
-		stateCh:  make(chan State, 8),
-		updateCh: make(chan updateNote, 1),
-		retryCh:  make(chan struct{}, 1),
+		auth:       a,
+		q:          q,
+		coreURL:    coreURL,
+		appURL:     appURL,
+		version:    version,
+		stateCh:    make(chan State, 8),
+		updateCh:   make(chan updateNote, 1),
+		retryCh:    make(chan struct{}, 1),
+		signedInCh: make(chan struct{}, 1),
 	}
 }
 
@@ -155,6 +157,62 @@ func (t *Tray) SetQueued(msg string) {
 // retry immediately. Sends are non-blocking, so signals are coalesced.
 func (t *Tray) RetryCh() <-chan struct{} {
 	return t.retryCh
+}
+
+// SignedInCh returns a channel that receives a signal whenever the Sign In
+// handler produces a usable session. The upload worker parks on it while
+// signed out rather than polling GetToken on a timer: sign-in is a discrete
+// user action this same process handles, so there is nothing to poll for.
+// Sends are non-blocking, so signals are coalesced.
+func (t *Tray) SignedInCh() <-chan struct{} {
+	return t.signedInCh
+}
+
+// doSignIn runs the sign-in flow and applies its outcome to the tray. Called
+// on its own goroutine from the Sign In click handler, since SignIn blocks on
+// the browser round-trip.
+func (t *Tray) doSignIn() {
+	// Clear any reason left from a prior failed attempt so it can't leak
+	// into a later StateNotAuth (e.g. after Sign Out).
+	t.signInErr = ""
+	err := t.auth.SignIn(context.Background())
+	switch {
+	case err == nil:
+		// Fully signed in and persisted.
+	case errors.Is(err, auth.ErrSignedInDegraded):
+		// Signed in and durable, but the OS keychain is broken.
+		// Stay signed in; just log — no need to alarm the user.
+		slog.Warn("sign-in succeeded via encrypted fallback; OS keychain unavailable", "err", err)
+	case errors.Is(err, auth.ErrSignedInNotPersisted):
+		// Signed in for this session only. Surface it so the user knows
+		// they'll have to sign in again after a restart. Still a usable
+		// session, so the worker is woken all the same before returning early.
+		t.signalSignedIn()
+		t.SetError("Signed in, but couldn't save credentials — you may need to sign in again after restart (Windows Credential Manager may be full).")
+		return
+	default:
+		// Sign-in itself failed (error, timeout, or ctx cancellation). No
+		// session exists, so return to StateNotAuth with the reason — never
+		// the authenticated menu that StateError would render.
+		t.SetSignInFailed(err.Error())
+		return
+	}
+	t.signalSignedIn()
+	if t.hasGames {
+		t.SetState(StateIdle)
+	} else {
+		t.SetState(StateNoGames)
+	}
+}
+
+// signalSignedIn wakes a worker parked on SignedInCh. Non-blocking: if a
+// signal is already pending the worker has not consumed it yet, and one wake
+// is enough.
+func (t *Tray) signalSignedIn() {
+	select {
+	case t.signedInCh <- struct{}{}:
+	default:
+	}
 }
 
 // NotifyDropped surfaces that count session(s) were dropped from the local
@@ -385,37 +443,7 @@ func (t *Tray) eventLoop(m *menuItems) {
 			t.pendingUpdatePath = note.pendingPath
 
 		case <-m.signIn.ClickedCh:
-			go func() {
-				// Clear any reason left from a prior failed attempt so it
-				// can't leak into a later StateNotAuth (e.g. after Sign Out).
-				t.signInErr = ""
-				err := t.auth.SignIn(context.Background())
-				switch {
-				case err == nil:
-					// Fully signed in and persisted.
-				case errors.Is(err, auth.ErrSignedInDegraded):
-					// Signed in and durable, but the OS keychain is broken.
-					// Stay signed in; just log — no need to alarm the user.
-					slog.Warn("sign-in succeeded via encrypted fallback; OS keychain unavailable", "err", err)
-				case errors.Is(err, auth.ErrSignedInNotPersisted):
-					// Signed in for this session only. Surface it so the user
-					// knows they'll have to sign in again after a restart.
-					t.SetError("Signed in, but couldn't save credentials — you may need to sign in again after restart (Windows Credential Manager may be full).")
-					return
-				default:
-					// Sign-in itself failed (error, timeout, or ctx
-					// cancellation). No session exists, so return to
-					// StateNotAuth with the reason — never the
-					// authenticated menu that StateError would render.
-					t.SetSignInFailed(err.Error())
-					return
-				}
-				if t.hasGames {
-					t.SetState(StateIdle)
-				} else {
-					t.SetState(StateNoGames)
-				}
-			}()
+			go t.doSignIn()
 
 		case <-m.signOut.ClickedCh:
 			go func() {

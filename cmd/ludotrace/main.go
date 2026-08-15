@@ -438,6 +438,13 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors *extractorStore, t *tray.Tray) {
 	var backoff uploadBackoff
 	retryCh := t.RetryCh()
+	signedInCh := t.SignedInCh()
+
+	// True while the loop is parked on the not-signed-in branch. Entering that
+	// state is the event worth a log line; sitting in it — possibly for days —
+	// is not, so the log happens on the transition only and is armed again by
+	// the next successful GetToken.
+	notSignedIn := false
 
 	// A single reusable timer for all backoff/retry delays in this loop,
 	// rather than a fresh time.After per branch — under rapid repeated
@@ -460,6 +467,25 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			}
 			return false
 		case <-timer.C:
+			return true
+		}
+	}
+
+	// waitForSignIn blocks until there is a reason to re-check auth: the tray
+	// reports a usable session, or the user clicks Retry Now. No timer — the
+	// only writer of a token is auth.SignIn, and its only caller is the tray
+	// handler that sends the signal, so a wake cannot be missed and a fallback
+	// poll would have nothing to find. Anything that later obtains a token by
+	// another route must signal it. Same contract as wait: false means ctx was
+	// cancelled and the caller should return.
+	waitForSignIn := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-signedInCh:
+			slog.Info("signed in — resuming uploads")
+			return true
+		case <-retryCh:
 			return true
 		}
 	}
@@ -510,7 +536,12 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if err != nil {
 			if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, auth.ErrTokenRevoked) {
 				t.SetState(tray.StateNotAuth)
-				if !wait(10 * time.Second) {
+				if !notSignedIn {
+					notSignedIn = true
+					slog.Warn("not signed in — uploads paused until sign-in",
+						"queued", q.Len(), "err", err)
+				}
+				if !waitForSignIn() {
 					return
 				}
 				continue
@@ -521,6 +552,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			}
 			continue
 		}
+		notSignedIn = false
 
 		t.SetUploading(item.GameID)
 
