@@ -35,10 +35,17 @@ type Queue struct {
 	path  string
 	items []Item
 	mu    sync.Mutex
+
+	// enqueuedCh carries a coalesced signal that the queue went from empty to
+	// having work, so a consumer can block instead of polling Len. Buffered
+	// depth 1 with a non-blocking send: a signal raised while the consumer is
+	// busy elsewhere is retained rather than lost, and repeated enqueues
+	// collapse into the one wake they warrant.
+	enqueuedCh chan struct{}
 }
 
 func New(path string) (*Queue, error) {
-	q := &Queue{path: path}
+	q := &Queue{path: path, enqueuedCh: make(chan struct{}, 1)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		q.items = []Item{}
@@ -96,7 +103,30 @@ func (q *Queue) Enqueue(item Item) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.items = append(q.items, item)
+	// Signal before flushing, and regardless of its outcome: the item is in
+	// q.items either way, so it is uploadable and a consumer blocked on
+	// Enqueued must not be left asleep by a failed write to disk.
+	q.signalEnqueued()
 	return q.flush()
+}
+
+// Enqueued returns a channel that receives when an item is enqueued. A
+// consumer that finds the queue empty blocks on this instead of re-checking
+// Len on a timer — nothing but Enqueue can make the queue non-empty at
+// runtime, so there is nothing a poll would find that this does not deliver.
+// Items already on disk are loaded by New, before any consumer's first pass.
+func (q *Queue) Enqueued() <-chan struct{} {
+	return q.enqueuedCh
+}
+
+// signalEnqueued wakes a consumer blocked on Enqueued. Must be called with
+// q.mu held. Non-blocking: a pending signal has not been consumed yet, and one
+// wake is enough to get the consumer back to reading Len.
+func (q *Queue) signalEnqueued() {
+	select {
+	case q.enqueuedCh <- struct{}{}:
+	default:
+	}
 }
 
 // Items returns a snapshot of the queued items in arrival order (oldest

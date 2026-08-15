@@ -600,6 +600,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 	var backoff uploadBackoff
 	retryCh := t.RetryCh()
 	signedInCh := t.SignedInCh()
+	enqueuedCh := q.Enqueued()
 
 	// True while the loop is parked on the not-signed-in branch. Entering that
 	// state is the event worth a log line; sitting in it — possibly for days —
@@ -651,6 +652,21 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		}
 	}
 
+	// waitForWork blocks until there is something to upload. Enqueue is the
+	// only thing that can make the queue non-empty at runtime (items already
+	// on disk are loaded by queue.New, before the first pass below), so this
+	// needs no timer either — see waitForSignIn. Same contract as wait.
+	waitForWork := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-enqueuedCh:
+			return true
+		case <-retryCh:
+			return true
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -679,7 +695,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		}
 
 		if q.Len() == 0 {
-			if !wait(5 * time.Second) {
+			if !waitForWork() {
 				return
 			}
 			continue
