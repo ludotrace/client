@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 	"github.com/ludotrace/client/internal/keychain"
 	"github.com/ludotrace/client/internal/knowngames"
 	"github.com/ludotrace/client/internal/lock"
+	"github.com/ludotrace/client/internal/proc"
 	"github.com/ludotrace/client/internal/queue"
 	"github.com/ludotrace/client/internal/session"
 	"github.com/ludotrace/client/internal/splash"
@@ -42,7 +44,7 @@ import (
 )
 
 func main() {
-	// --finish-update <original-path> [args...]
+	// --finish-update <original-path> [--parent-pid <pid>] [args...]
 	// Run by the pending binary after the user clicks "Restart to Update".
 	// Copies itself over the original path, deletes itself, relaunches.
 	if len(os.Args) >= 3 && os.Args[1] == "--finish-update" {
@@ -50,35 +52,10 @@ func main() {
 		return
 	}
 
-	level := slog.LevelInfo
-	if strings.ToLower(os.Getenv("LUDOTRACE_LOG_LEVEL")) == "debug" {
-		level = slog.LevelDebug
-	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-
-	// Resolve + create the config dir early so logging can be teed into a file
-	// there before any other work runs. A GUI-subsystem Windows build
-	// (-H=windowsgui, see Makefile) has no console, so stderr goes nowhere on a
-	// user's machine — ludotrace.log is the only post-hoc diagnostic. stderr is
-	// kept alongside it for console/dev runs.
-	cfgDir, err := config.Dir()
+	cfgDir, err := setupLogging()
 	if err != nil {
-		slog.Error("failed to resolve config dir", "err", err)
+		slog.Error("failed to prepare config dir", "err", err)
 		os.Exit(1)
-	}
-	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
-		slog.Error("failed to create config dir", "err", err)
-		os.Exit(1)
-	}
-	if f := openLogFile(cfgDir); f != nil {
-		// Tee tolerantly, not via io.MultiWriter: a GUI-subsystem build
-		// (-H=windowsgui) has an invalid os.Stderr, and io.MultiWriter aborts
-		// on the first writer's error — which would leave the log file empty,
-		// silently defeating the whole point. tolerantTee writes to every
-		// writer regardless, so a dead stderr can't suppress the file.
-		w := &tolerantTee{writers: []io.Writer{os.Stderr, f}}
-		slog.SetDefault(slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})))
-		// f is intentionally left open for the lifetime of the process.
 	}
 
 	// --check-update: one-shot. Runs the same Check+Stage path as the
@@ -230,6 +207,42 @@ func main() {
 	flushForShutdown(extractors)
 }
 
+// setupLogging installs the default slog handler and returns the config dir.
+//
+// Logging is teed to ludotrace.log in the config dir as well as stderr: a
+// GUI-subsystem Windows build (-H=windowsgui, see Makefile) has no console, so
+// stderr goes nowhere on a user's machine and the file is the only post-hoc
+// diagnostic. stderr is kept alongside it for console/dev runs.
+//
+// An error means the config dir could not be resolved or created; the stderr
+// handler is installed regardless, so a caller that can carry on still logs.
+func setupLogging() (string, error) {
+	level := slog.LevelInfo
+	if strings.ToLower(os.Getenv("LUDOTRACE_LOG_LEVEL")) == "debug" {
+		level = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
+	cfgDir, err := config.Dir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		return "", err
+	}
+	if f := openLogFile(cfgDir); f != nil {
+		// Tee tolerantly, not via io.MultiWriter: a GUI-subsystem build
+		// (-H=windowsgui) has an invalid os.Stderr, and io.MultiWriter aborts
+		// on the first writer's error — which would leave the log file empty,
+		// silently defeating the whole point. tolerantTee writes to every
+		// writer regardless, so a dead stderr can't suppress the file.
+		w := &tolerantTee{writers: []io.Writer{os.Stderr, f}}
+		slog.SetDefault(slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})))
+		// f is intentionally left open for the lifetime of the process.
+	}
+	return cfgDir, nil
+}
+
 // tolerantTee fans each log record out to every writer, ignoring individual
 // write errors so one dead writer never suppresses the others. This exists
 // specifically because os.Stderr is an invalid handle under a -H=windowsgui
@@ -358,7 +371,12 @@ func makeRestartFn() func(pendingPath string) {
 			slog.Error("restart: could not resolve current executable", "err", err)
 			return
 		}
-		args := append([]string{"--finish-update", self}, os.Args[1:]...)
+		// The PID goes across so the child can wait for this process to be
+		// fully gone before touching the install path. On Windows the
+		// executable stays locked for a moment after os.Exit, and a rename
+		// attempted inside that window fails with a sharing violation.
+		args := []string{"--finish-update", self, parentPIDFlag, strconv.Itoa(os.Getpid())}
+		args = append(args, os.Args[1:]...)
 		cmd := exec.Command(pendingPath, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -370,51 +388,123 @@ func makeRestartFn() func(pendingPath string) {
 	}
 }
 
+// parentPIDFlag carries the outgoing process's PID to the --finish-update
+// child. It is optional: a pending binary is launched by the *previous*
+// version, so a client updating from a release that predates the flag passes
+// only the old positional form and the child falls back to retrying alone.
+const parentPIDFlag = "--parent-pid"
+
+const (
+	// parentExitTimeout bounds the wait for the outgoing process to go away.
+	// It is a lock-release wait, not a shutdown wait — the parent has already
+	// called os.Exit by the time the child starts.
+	parentExitTimeout = 15 * time.Second
+
+	// renameAttempts and renameBackoff govern the retry around the swap
+	// itself, which covers the parentless case and any handle the OS is slow
+	// to release after the process is gone.
+	renameAttempts = 8
+	renameBackoff  = 250 * time.Millisecond
+)
+
 // finishUpdate is run by the newly-downloaded binary via --finish-update.
 // It copies itself over originalPath, deletes the pending binary, then
 // relaunches from the proper install location.
-func finishUpdate(originalPath string, remainingArgs []string) {
+func finishUpdate(originalPath string, args []string) {
+	// Logging comes first. This is the one path that can leave a user with no
+	// client running at all, so it is the last one that should be silent —
+	// and every failure below predates the normal startup logging setup.
+	if _, err := setupLogging(); err != nil {
+		slog.Error("finish-update: prepare log file", "err", err)
+	}
+
+	parentPID, remainingArgs := parseParentPID(args)
+
 	self, err := os.Executable()
 	if err != nil {
 		slog.Error("finish-update: resolve self", "err", err)
 		os.Exit(1)
 	}
 
-	src, err := os.Open(self)
+	os.Exit(runFinishUpdate(swapDeps{
+		self:          self,
+		originalPath:  originalPath,
+		remainingArgs: remainingArgs,
+		parentPID:     parentPID,
+	}))
+}
+
+// parseParentPID splits an optional leading "--parent-pid <n>" off the
+// argument list, returning the PID (0 if absent or unparseable) and the
+// remaining args, which are the original launch flags to relaunch with.
+func parseParentPID(args []string) (int, []string) {
+	if len(args) >= 2 && args[0] == parentPIDFlag {
+		pid, err := strconv.Atoi(args[1])
+		if err != nil {
+			return 0, args[2:]
+		}
+		return pid, args[2:]
+	}
+	return 0, args
+}
+
+// swapDeps holds the inputs to the update swap plus the seams the tests use to
+// drive its failure branches. A nil function field takes the real behaviour.
+type swapDeps struct {
+	self          string
+	originalPath  string
+	remainingArgs []string
+	parentPID     int
+
+	waitForExit func(pid int, timeout time.Duration) bool
+	rename      func(oldpath, newpath string) error
+	launch      func(path string, args []string) error
+	sleep       func(time.Duration)
+}
+
+// runFinishUpdate performs the swap and returns a process exit code.
+//
+// Its governing rule is that it must never return with nothing running: if the
+// new binary cannot be put in place, the old one — still intact on disk — is
+// relaunched and the failure reported through a non-zero code. A stale version
+// running beats no version running, because the client is the only thing that
+// will ever offer the user another update.
+func runFinishUpdate(d swapDeps) int {
+	waitForExit := d.waitForExit
+	if waitForExit == nil {
+		waitForExit = proc.WaitForExit
+	}
+	rename := d.rename
+	if rename == nil {
+		rename = os.Rename
+	}
+	launch := d.launch
+	if launch == nil {
+		launch = startDetached
+	}
+	sleep := d.sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+
+	// Wait for the process holding originalPath to be gone before trying to
+	// replace it. Missing or still-live is not fatal — the retry below covers
+	// both — so this only ever logs.
+	if d.parentPID > 0 && !waitForExit(d.parentPID, parentExitTimeout) {
+		slog.Warn("finish-update: parent still running; attempting swap anyway",
+			"parent_pid", d.parentPID, "waited", parentExitTimeout)
+	}
+
+	tmpPath, err := stageBinary(d.self, d.originalPath)
 	if err != nil {
-		slog.Error("finish-update: open self", "err", err)
-		os.Exit(1)
+		slog.Error("finish-update: stage new binary", "err", err)
+		return relaunchOriginal(d, launch, 1)
 	}
 
-	dir := filepath.Dir(originalPath)
-	tmp, err := os.CreateTemp(dir, "ludotrace-install-*")
-	if err != nil {
-		src.Close()
-		slog.Error("finish-update: create temp", "err", err)
-		os.Exit(1)
-	}
-	tmpPath := tmp.Name()
-
-	if _, err := io.Copy(tmp, src); err != nil {
-		tmp.Close()
-		src.Close()
+	if err := renameWithRetry(rename, sleep, tmpPath, d.originalPath); err != nil {
 		os.Remove(tmpPath)
-		slog.Error("finish-update: copy binary", "err", err)
-		os.Exit(1)
-	}
-	tmp.Close()
-	src.Close()
-
-	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		os.Remove(tmpPath)
-		slog.Error("finish-update: chmod", "err", err)
-		os.Exit(1)
-	}
-
-	if err := os.Rename(tmpPath, originalPath); err != nil {
-		os.Remove(tmpPath)
-		slog.Error("finish-update: rename", "err", err)
-		os.Exit(1)
+		slog.Error("finish-update: rename", "attempts", renameAttempts, "err", err)
+		return relaunchOriginal(d, launch, 1)
 	}
 
 	// Best-effort remove of the pending binary (self). This succeeds on
@@ -423,16 +513,87 @@ func finishUpdate(originalPath string, remainingArgs []string) {
 	// the relaunched install-path process via updater.ClearStaged — by then
 	// this process has exited and the file is unlocked. The sidecar is also
 	// cleared there, so leaving it in place here is intentional.
-	_ = os.Remove(self)
+	_ = os.Remove(d.self)
 
-	cmd := exec.Command(originalPath, remainingArgs...)
+	if err := launch(d.originalPath, d.remainingArgs); err != nil {
+		slog.Error("finish-update: relaunch", "path", d.originalPath, "err", err)
+		return 1
+	}
+	slog.Info("finish-update: swap complete", "path", d.originalPath)
+	return 0
+}
+
+// stageBinary copies the running binary to a temp file alongside originalPath
+// — the same directory, so the swap is a rename within one filesystem rather
+// than a copy that could be seen half-written — and returns its path.
+func stageBinary(self, originalPath string) (string, error) {
+	src, err := os.Open(self)
+	if err != nil {
+		return "", fmt.Errorf("open self: %w", err)
+	}
+	defer src.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(originalPath), "ludotrace-install-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("copy binary: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("chmod: %w", err)
+	}
+	return tmpPath, nil
+}
+
+// renameWithRetry retries the swap on a fixed backoff. The failure it exists
+// for is a Windows sharing violation on an executable whose process has only
+// just exited, which clears on its own within moments; there is no way to ask
+// the OS when the handle is released, so it is retried rather than waited on.
+func renameWithRetry(rename func(string, string) error, sleep func(time.Duration), tmpPath, originalPath string) error {
+	var err error
+	for attempt := 1; attempt <= renameAttempts; attempt++ {
+		if err = rename(tmpPath, originalPath); err == nil {
+			return nil
+		}
+		if attempt < renameAttempts {
+			slog.Warn("finish-update: rename failed, retrying",
+				"attempt", attempt, "of", renameAttempts, "err", err)
+			sleep(renameBackoff)
+		}
+	}
+	return err
+}
+
+// relaunchOriginal starts the untouched old binary so a failed swap does not
+// leave the machine with no client. Returns failCode, or 1 if even the
+// relaunch fails — there is nothing further to try at that point.
+func relaunchOriginal(d swapDeps, launch func(string, []string) error, failCode int) int {
+	if err := launch(d.originalPath, d.remainingArgs); err != nil {
+		slog.Error("finish-update: could not relaunch original after failed swap; no client is running",
+			"path", d.originalPath, "err", err)
+		return 1
+	}
+	slog.Warn("finish-update: swap failed, relaunched previous version",
+		"path", d.originalPath, "staged_version", version.Version)
+	return failCode
+}
+
+// startDetached launches path and returns without waiting for it.
+func startDetached(path string, args []string) error {
+	cmd := exec.Command(path, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		slog.Error("finish-update: relaunch", "err", err)
-		os.Exit(1)
-	}
-	os.Exit(0)
+	return cmd.Start()
 }
 
 func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Client, q *queue.Queue, extractors *extractorStore, t *tray.Tray) {
