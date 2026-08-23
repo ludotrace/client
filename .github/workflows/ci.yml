@@ -36,6 +36,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # systray and dialog are cgo — without the GTK/ayatana headers govulncheck
+      # cannot load those packages and fails before it scans anything.
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   build-windows:
