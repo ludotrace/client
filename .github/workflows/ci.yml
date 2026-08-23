@@ -24,6 +24,23 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
       - run: make test
 
+  # Dependabot covers module and action versions, but nothing it tracks maps to
+  # the `go` directive — so stdlib CVEs (fixed by a toolchain bump, not a
+  # dependency bump) are invisible to it. This is the only check that sees them,
+  # and the release build pins its toolchain from go.mod, so a miss here ships.
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # systray and dialog are cgo — without the GTK/ayatana headers govulncheck
+      # cannot load those packages and fails before it scans anything.
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
   build-windows:
     name: Build (Windows)
     runs-on: ubuntu-latest
