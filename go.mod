@@ -9,7 +9,7 @@ require (
 	github.com/sqweek/dialog v0.0.0-20260123140253-64c163d53aac
 	github.com/zalando/go-keyring v0.2.8
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
