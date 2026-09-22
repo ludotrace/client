@@ -58,6 +58,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Decided before anything starts so the tray is never constructed on a host
+	// that cannot draw one. See headlessArg.
+	headless := hasArg(os.Args, headlessArg)
+
 	// --check-update: one-shot. Runs the same Check+Stage path as the
 	// background worker, logs the outcome, and exits. Does not take the
 	// singleton lock or start the tray, so it can run alongside a live
@@ -189,22 +193,62 @@ func main() {
 
 	go runUpdateWorker(ctx, cfgDir, t)
 
-	// Bridge signal cancellation → systray shutdown.
-	go func() {
-		<-ctx.Done()
-		t.Quit()
-	}()
+	// Bridge signal cancellation → systray shutdown. RunHeadless returns on
+	// ctx itself, and systray.Quit() without a preceding systray.Run() would
+	// poke a GTK loop that was never started, so the bridge is tray-only.
+	if !headless {
+		go func() {
+			<-ctx.Done()
+			t.Quit()
+		}()
+	}
 
 	slog.Info("ludotrace client started",
 		"core_url", cfg.CoreURL,
 		"app_url", cfg.AppURL,
 		"games", len(cfg.Games),
 		"version", version.Version,
+		"headless", headless,
 	)
-	t.Run() // blocks until Quit() or systray exit
+	if headless {
+		t.RunHeadless(ctx) // blocks until ctx is cancelled (SIGINT/SIGTERM)
+	} else {
+		t.Run() // blocks until Quit() or systray exit
+	}
 	stop()
 
 	flushForShutdown(extractors)
+}
+
+// headlessArg runs the daemon with no system tray.
+//
+// It is required wherever no display or StatusNotifier host exists — SteamOS
+// Gaming Mode is the case it was added for (see docs/steam-deck.md), and a
+// systemd user service or container is the same situation. Without it the
+// Linux binary does not merely lose its icon: getlantern/systray's GTK backend
+// calls gtk_init, which exits the process on "cannot open display", so the
+// daemon dies at startup having watched nothing.
+//
+// A flag rather than sniffing $DISPLAY: the environment a systemd unit inherits
+// is not a reliable statement of intent, and a desktop user whose tray host is
+// briefly missing should see the failure rather than silently lose their menu.
+const headlessArg = "--headless"
+
+// hasArg reports whether want appears anywhere in the launch arguments.
+//
+// Positional, unlike the os.Args[1] checks the update one-shots use: --headless
+// composes with other markers (a unit may pass --autostart --headless), so it
+// cannot assume a slot.
+func hasArg(args []string, want string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	for _, a := range args[1:] {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 // setupLogging installs the default slog handler and returns the config dir.

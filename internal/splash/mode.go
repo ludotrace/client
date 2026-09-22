@@ -23,7 +23,8 @@ type Launch struct {
 // suppressArgs are the first-argument markers that identify a non-interactive
 // launch. --autostart is written into the Windows Run key by
 // internal/autostart; --finish-update and --check-update are update one-shots
-// handled in main before the tray ever starts.
+// handled in main before the tray ever starts; --headless is the no-tray
+// daemon mode a systemd user service runs under.
 //
 // The list is defensive belt-and-suspenders for --finish-update/--check-update:
 // those branches return/exit in main before the splash is ever triggered, but
@@ -33,6 +34,7 @@ var suppressArgs = map[string]bool{
 	"--autostart":     true,
 	"--finish-update": true,
 	"--check-update":  true,
+	"--headless":      true,
 }
 
 // DecideLaunch classifies a launch from its raw argv (pass os.Args directly).

@@ -1,0 +1,40 @@
+[Unit]
+Description=LudoTrace session capture daemon
+Documentation=https://github.com/ludotrace/client/blob/main/docs/steam-deck.md
+
+# The sign-in token lives in the OS keychain, which on Linux is the Secret
+# Service on the session bus. Without it the daemon starts but parks signed
+# out — see docs/steam-deck.md § "Sign-in does not survive into Gaming Mode".
+After=dbus.socket
+Wants=dbus.socket
+
+# A daemon that cannot start is almost always misconfigured (missing binary,
+# missing config), and retrying that forever buries the real error under
+# restart noise. Five tries in five minutes, then systemd gives up and holds
+# the failure where `systemctl --user status` will show it.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# --headless is required, not optional. The Linux tray is cgo GTK3, and
+# gtk_init exits the process when it cannot open a display — which is every
+# Gaming Mode session, and every systemd unit with no desktop environment.
+# Drop the flag and this unit crash-loops until StartLimitBurst stops it.
+ExecStart=%h/.local/bin/ludotrace-linux --headless
+
+# on-failure, not always: a clean SIGTERM exits 0 (the client flushes its open
+# session on the way out), so stopping the service must not restart it.
+Restart=on-failure
+RestartSec=10
+
+# No network dependency on purpose. The upload queue is durable and backs off
+# on its own, so starting before the Deck has Wi-Fi costs nothing and avoids
+# ordering this behind network-online.target.
+
+[Install]
+# SteamOS runs one user session across both Desktop and Gaming Mode, and
+# default.target is reached in both — so the daemon survives a mode switch
+# rather than being tied to a graphical session that Gaming Mode replaces.
+WantedBy=default.target

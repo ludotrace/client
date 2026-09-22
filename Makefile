@@ -33,7 +33,9 @@ build-windows:
 	go generate ./cmd/ludotrace/
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui $(LDFLAGSBASE)" -o $(DIST)/$(BINARY).exe $(PKG)
 
-# Requires: pkg-config libgtk-3-dev libayatana-appindicator3-dev gnome-keyring
+# Requires: pkg-config libgtk-3-dev libayatana-appindicator3-dev gnome-keyring.
+# The resulting binary needs a display for its tray; run it with --headless on
+# a host without one (see docs/steam-deck.md).
 build-linux:
 	mkdir -p $(DIST)
 	rm -f $(DIST)/$(BINARY)-linux

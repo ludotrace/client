@@ -36,6 +36,29 @@ const (
 	StateQueued                    // transient failure: sessions queued, retrying with backoff
 )
 
+// String names the state for logs. Headless runs have no icon or status line,
+// so this is the only rendering of state they get.
+func (s State) String() string {
+	switch s {
+	case StateIdle:
+		return "idle"
+	case StateUploading:
+		return "uploading"
+	case StateError:
+		return "error"
+	case StateLimitReached:
+		return "limit_reached"
+	case StateNotAuth:
+		return "not_signed_in"
+	case StateNoGames:
+		return "no_games"
+	case StateQueued:
+		return "queued"
+	default:
+		return fmt.Sprintf("state(%d)", int(s))
+	}
+}
+
 type Tray struct {
 	auth          auth.Client
 	q             *queue.Queue
@@ -117,7 +140,93 @@ func (t *Tray) Run() {
 	systray.Run(t.onReady, t.onExit)
 }
 
+// RunHeadless is Run's counterpart for a host with no display and no
+// StatusNotifier host — SteamOS Gaming Mode above all, but equally a systemd
+// user service or a container. It blocks until ctx is cancelled, so main can
+// call it in Run's place without reshaping startup.
+//
+// It exists because systray cannot degrade: getlantern/systray's Linux backend
+// is cgo GTK3, and gtk_init calls exit(1) when it cannot open a display, so
+// Run does not fail — it takes the process down with it, before the watcher or
+// the upload worker have done anything. Under a unit with Restart=on-failure
+// that is a crash loop, not an outage you can read.
+//
+// Draining the channels is not incidental: stateCh is buffered 8, and with no
+// event loop consuming it the ninth SetState would block the upload worker in
+// place. Everything it drains is logged rather than drawn, because on a
+// headless host the log file is the only signal the daemon has.
+//
+// Nothing here can be clicked, so the interactive menu items have no
+// counterpart: Sign In, Add Game and Retry Now are unreachable, and a daemon
+// that is signed out or unconfigured parks until someone fixes it from a
+// desktop session. logState marks exactly those two states as warnings so the
+// reason is in the log rather than inferred from silence.
+func (t *Tray) RunHeadless(ctx context.Context) {
+	slog.Info("tray disabled (headless) — state changes are logged, menu actions unavailable")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case s := <-t.stateCh:
+			t.logState(s)
+
+		case note := <-t.updateCh:
+			// No one can click "Restart to Update" here, so say what actually
+			// applies it. The staged binary is already on disk; the swap runs
+			// on the next start of the service.
+			slog.Info("update staged — restart the service to apply",
+				"version", note.version, "pending_path", note.pendingPath)
+		}
+	}
+}
+
+// logState renders one state change as a log line, mirroring what applyState
+// would have put on the status line.
+//
+// It reads the message fields (errorMsg, queuedMsg, …) the same way applyState
+// does — published by the sender's SetState channel send — so it inherits that
+// same contract rather than introducing a new one.
+func (t *Tray) logState(s State) {
+	attrs := []any{"state", s.String()}
+
+	switch s {
+	case StateUploading:
+		slog.Info("client state", append(attrs, "game_id", t.uploadingGame)...)
+
+	case StateError:
+		slog.Error("client state", append(attrs, "detail", t.errorMsg)...)
+
+	case StateQueued:
+		slog.Info("client state", append(attrs, "detail", t.queuedMsg)...)
+
+	case StateLimitReached:
+		slog.Warn("client state", append(attrs, "detail", limitReachedTitle(t.droppedCount))...)
+
+	case StateNotAuth:
+		// Actionable, and only from a desktop session: there is no Sign In to
+		// click here, so uploads stay parked until someone signs in with a
+		// tray available and the token lands in the OS keychain.
+		if t.signInErr != "" {
+			attrs = append(attrs, "detail", t.signInErr)
+		}
+		slog.Warn("client state — sign in from a desktop session to resume uploads", attrs...)
+
+	case StateNoGames:
+		// Same shape: Add Game is a tray action, so a headless daemon with no
+		// games configured needs config.toml edited by hand.
+		slog.Warn("client state — no games configured; add one to config.toml", attrs...)
+
+	default:
+		slog.Info("client state", attrs...)
+	}
+}
+
 // Quit signals the systray loop to exit, causing Run to return.
+//
+// Only valid after Run. A headless daemon has no systray loop to stop —
+// systray.Quit() would reach into a GTK loop that was never started — and
+// RunHeadless returns on its own ctx instead.
 func (t *Tray) Quit() {
 	systray.Quit()
 }
