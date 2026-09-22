@@ -39,6 +39,13 @@ Confirmed by manual end-to-end test or observed running.
 - Post-202 cleanup of the temp session file
 - 429 limit-reached handling
 
+**Headless / Steam Deck**
+- Headless mode (`--headless`) — no tray, draining the tray's event channels so the upload worker cannot wedge
+- Static Linux build (`make build-linux-headless`) — `-tags headless` + `CGO_ENABLED=0`, no GTK link; required on SteamOS, which ships no `libayatana-appindicator3`. CI asserts it stays static
+- `--sign-in` / `--sign-out` one-shots — browser sign-in without a tray, the only way to authenticate a headless install
+- Linux token storage via `systemd-creds --user` (`internal/keychain/fallback_linux.go`) — seals against an OS-held TPM2-backed key where no Secret Service exists, as on SteamOS. Confirmed on a Deck: sealed by `--sign-in`, read back by the service. Needs systemd 256+
+- systemd user unit (`packaging/systemd/`) — starts the daemon on a Steam Deck with `games` loaded and the token readable; runbook in `docs/steam-deck.md`
+
 **Tray**
 - Six states, driven from queue + auth state
 - Open Dashboard, Manage Games, Sign In / Sign Out
@@ -49,12 +56,8 @@ Confirmed by manual end-to-end test or observed running.
 
 ## Implemented, not yet validated
 
-- Headless mode (`--headless`) — runs with no tray for hosts with no display, draining the tray's event channels so the upload worker cannot wedge; verified on a no-DISPLAY/no-D-Bus Linux host
-- Headless Linux build (`make build-linux-headless`) — `-tags headless` + `CGO_ENABLED=0`, dropping systray and sqweek/dialog for a static binary with no GTK link; required on SteamOS, which ships no `libayatana-appindicator3`. CI asserts it stays static
-- `--sign-in` / `--sign-out` one-shots — browser sign-in without a tray, the only way to authenticate a headless install
 - Headless builds take the `linux/amd64-headless` update-manifest key, so they cannot self-update into the GTK-linked binary
-- Linux token storage via `systemd-creds --user` (`internal/keychain/fallback_linux.go`) — seals the token against an OS-held, TPM2-backed key when no Secret Service exists, which is every SteamOS install; needs systemd 256+, reports unsupported below that rather than degrading
-- Steam Deck deployment — systemd user unit in `packaging/systemd/`, runbook in `docs/steam-deck.md`. Static binary and capture confirmed on hardware; upload path unverified end to end
+- Steam Deck — capture, upload and persistence across a Desktop/Gaming mode switch, none yet exercised on hardware
 - Linux binary published as a CI artifact (`ludotrace-linux`) on every push, alongside the existing release-tag asset
 - Bounded upload queue — age-based drop-oldest, newest-first upload (#60)
 - Permanent-failure retirement — a 400 or too-large item advances the offset past the rejected region, removes its temp file, and leaves the queue by path (#76)
