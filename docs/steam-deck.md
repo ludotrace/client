@@ -34,21 +34,67 @@ Without the flag the daemon dies at startup having watched nothing, and
 
 ---
 
-## 1. Sign in first, from Desktop Mode
+## 1. Sign in from Desktop Mode, and make the wallet openable
 
-Sign-in opens a browser and stores the token in the OS keychain. A headless
-daemon can do neither, so it must already be signed in before you enable the
-service.
+Sign-in needs a browser and a tray button, so it happens in Desktop Mode. The
+daemon in Gaming Mode then has to read that same token back — and on the Deck's
+default settings it cannot, for a reason worth fixing before you go any further.
 
-Switch to Desktop Mode, run the binary normally (no `--headless`), and click
-**Sign In** in the tray.
+**On Linux the token is only ever in the keyring.** Unlike Windows there is no
+encrypted on-disk fallback: the client deliberately refuses to write a token as
+plaintext (`internal/keychain/fallback_other.go`). So the token is readable only
+where the keyring is both *reachable* and *unlocked*.
 
-> **On Linux the token is only ever in the keyring.** Unlike Windows, there is no
-> encrypted on-disk fallback — the client deliberately refuses to write a token
-> as plaintext. So if the keyring that holds it is not reachable from the session
-> the service runs in, the token cannot be read back and nothing uploads, even
-> though sign-in succeeded. Capture keeps working regardless. See
-> [Nothing uploads](#nothing-uploads).
+Reachable is fine. SteamOS 3.8 ships Plasma 6, whose Secret Service provider is
+`ksecretd` (KWallet has served `org.freedesktop.secrets` since KDE Frameworks
+5.97). It is D-Bus activated, so it does not need a Plasma session running — a
+session bus is enough, and Gaming Mode has one. The well-known
+"[no keyring on SteamOS][valve928]" complaint is about *gnome-keyring*
+specifically; KDE's own provider is present.
+
+**Unlocked is the problem.** The Deck auto-logs-in, so no password is ever
+typed, so `kwallet-pam` has nothing to unlock the wallet with. A
+password-protected wallet can then only be opened by someone typing the password
+into a prompt — which is exactly what Gaming Mode has nobody to do.
+
+So do one of these in Desktop Mode **before** enabling the service:
+
+- **Give the wallet a blank password** (System Settings → KDE Wallet → change
+  password, leave it empty). An empty-password wallet opens without prompting,
+  in any session. This is the usual Deck workaround and the one that survives a
+  mode switch.
+- **Or disable auto-login**, so `kwallet-pam` can unlock the wallet with the
+  password you type at boot.
+
+While you are in System Settings → KDE Wallet, confirm **"Use KWallet for the
+Secret Service interface"** is enabled.
+
+> A blank-password wallet is protected at rest by file permissions rather than a
+> passphrase (`~/.local/share/kwalletd/*.kwl`, mode 0600). That is a real
+> trade-off, and close to the protection the client declines to implement itself
+> — the difference being that it is the OS's store, under the user's control, not
+> a token this app wrote in the clear. If that trade is unacceptable, keep the
+> wallet password and accept that uploads only run in Desktop Mode.
+
+Then run the binary normally (no `--headless`) and click **Sign In**.
+
+Verify the token is readable the way the service will read it — a plain
+`busctl` presence check is not enough, because a *locked* wallet still answers:
+
+```bash
+secret-tool lookup service ludotrace username opaque_token
+```
+
+Printing the token means Gaming Mode will be able to read it too. An error, an
+empty result, or a password prompt means it will not.
+
+`secret-tool` comes from `libsecret` and may not be present on a stock SteamOS
+image, which is read-only by default. If it is missing, skip it — the real test
+is step 6: start the service in Gaming Mode and read the journal. A repeating
+`failed to get auth token` with a `keychain:` error in it is the locked-wallet
+case.
+
+[valve928]: https://github.com/ValveSoftware/SteamOS/issues/928
 
 ## 2. Install the binary
 
@@ -194,23 +240,24 @@ case above. Expect roughly 17k of these a day while anything is queued;
 `ludotrace.log` rotates at 5 MiB so it will not fill the disk, but it will bury
 everything else.
 
-This is the one Linux-specific gap worth knowing about. On Windows the client
-falls back to an encrypted file when the OS credential store refuses; on Linux it
-deliberately does not, because the only thing it could encrypt with is the key
-store that is missing — so it declines to write a plaintext token instead. The
-token therefore lives in exactly one place: whichever keyring daemon provides
-`org.freedesktop.secrets` on the session bus. Desktop Mode has KDE's; Gaming Mode
-may not.
+Nearly always this means **the wallet is locked**, not that the token is bad or
+missing — see step 1. The Deck auto-logs-in, so nothing unlocks a
+password-protected wallet, and Gaming Mode has nobody to answer the prompt.
 
-Check which session has one:
+A provider being present is not the same as the wallet being open, so check
+readability rather than presence:
 
 ```bash
-busctl --user list | grep -i secrets
+busctl --user list | grep -i secrets   # is ksecretd reachable at all?
+secret-tool lookup service ludotrace username opaque_token   # is it actually readable?
 ```
 
-Nothing listed means no provider is running there. Confirm from Desktop Mode that
-the account really is signed in, and treat a Gaming-Mode-only failure as this
-rather than as a bad token.
+A locked wallet answers the first and fails the second. That is the case to fix:
+give the wallet a blank password in Desktop Mode, or disable auto-login (step 1).
+
+If the first command lists nothing either, no Secret Service is running in that
+session — confirm "Use KWallet for the Secret Service interface" is enabled in
+System Settings → KDE Wallet.
 
 **`client state — no games configured`.** `config.toml` is missing or has no
 `[[games]]` block that survived validation. Add Game is a tray action and is

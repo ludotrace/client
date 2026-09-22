@@ -263,13 +263,21 @@ anything that is a *menu action* (Sign In, Add Game, Retry Now) has no headless
 path at all, so the user must do it from a desktop session first.
 
 **On Linux the token has no on-disk fallback.** `internal/keychain` falls back to
-an encrypted file on Windows only; on Linux it deliberately refuses to write a
-plaintext token, so the token lives solely in the keyring providing
-`org.freedesktop.secrets`. A host without one still captures and queues, but
-cannot upload — and note the two failures differ: a reachable-but-empty keyring
+an encrypted file on Windows only (DPAPI, so the OS holds the key); on Linux it
+deliberately refuses to write a plaintext token, so the token lives solely in the
+keyring providing `org.freedesktop.secrets`. A host without one still captures
+and queues, but cannot upload.
+
+The two failures differ, and only one is quiet: a reachable-but-empty keyring
 returns `ErrNotSignedIn` and the upload worker parks on `waitForSignIn`, while an
-unreachable one returns an unclassified error and retries every 5s, logging each
-time. The second is the Steam Deck case.
+unreachable or locked one returns an unclassified error and retries every 5s,
+logging each time. The second is the Steam Deck case — SteamOS has a provider
+(`ksecretd`, D-Bus activated) but auto-login leaves the wallet locked, so it must
+be given a blank password. See `docs/steam-deck.md` step 1.
+
+`go-keyring` stores under attributes `service=ludotrace`, `username=opaque_token`
+— that is the `secret-tool lookup` form, and it does not match the `account`
+constant name in `keychain.go`.
 
 The Windows build is `-H=windowsgui` and has no console, so it emits nothing to a terminal.
 **When something doesn't work there, restoring a signal is the first task** — a fix without

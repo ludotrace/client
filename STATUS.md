@@ -50,7 +50,7 @@ Confirmed by manual end-to-end test or observed running.
 ## Implemented, not yet validated
 
 - Headless mode (`--headless`) — runs with no tray for hosts with no display, draining the tray's event channels so the upload worker cannot wedge; verified on a no-DISPLAY/no-D-Bus Linux host, not yet on a Steam Deck
-- Steam Deck deployment — systemd user unit in `packaging/systemd/`, runbook in `docs/steam-deck.md`; unwritten on real hardware
+- Steam Deck deployment — systemd user unit in `packaging/systemd/`, runbook in `docs/steam-deck.md`; Gaming Mode needs the KDE wallet given a blank password, since auto-login cannot unlock it and `ksecretd` is the only token store on Linux. Unverified on real hardware
 - Linux binary published as a CI artifact (`ludotrace-linux`) on every push, alongside the existing release-tag asset
 - Bounded upload queue — age-based drop-oldest, newest-first upload (#60)
 - Permanent-failure retirement — a 400 or too-large item advances the offset past the rejected region, removes its temp file, and leaves the queue by path (#76)
