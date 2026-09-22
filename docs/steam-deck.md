@@ -16,25 +16,44 @@ shapes everything below.
 |---|---|
 | Watching, extracting, queueing, uploading | Works — this is the whole daemon |
 | Tray icon and menu | Not available — use `--headless` |
-| Sign In | **Do this first, from Desktop Mode** — it needs a browser |
+| Sign In | **Do this first, from Desktop Mode** — `--sign-in`, needs a browser |
 | Add Game | Not available — write `config.toml` by hand (below) |
+| Sign Out | `--sign-out` |
 | Auto-update | Downloads and stages, but applies on the next service restart |
 
-`--headless` is not a convenience flag. The Linux tray is cgo GTK3, and
-`gtk_init` **exits the process** when it cannot open a display:
+**Use the `ludotrace-linux-headless` build.** SteamOS does not ship
+`libayatana-appindicator3`, which the normal Linux binary links for its tray, so
+that binary cannot start on a Deck at all:
 
 ```
-(ludotrace-linux:3811): Gtk-WARNING **: cannot open display:
-$ echo $?
-1
+ludotrace-linux: error while loading shared libraries:
+libayatana-appindicator3.so.1: cannot open shared object file
 ```
 
-Without the flag the daemon dies at startup having watched nothing, and
-`Restart=on-failure` turns that into a crash loop.
+The `--headless` flag does not help, because that link is resolved by the loader
+before any code runs. The headless build is compiled without the tray and
+without cgo, so it is statically linked and needs nothing installed.
 
 ---
 
-## 1. Sign in from Desktop Mode, and make the wallet openable
+## 1. Install the binary
+
+Download **`ludotrace-linux-headless`** from the [latest release][releases], or
+from a CI run's `ludotrace-linux-headless` artifact for an untagged build. Not
+`ludotrace-linux` — that one will not start here.
+
+```bash
+mkdir -p ~/.local/bin
+install -m 755 ~/Downloads/ludotrace-linux-headless ~/.local/bin/ludotrace-linux-headless
+```
+
+It is static, so there is nothing else to install and nothing to check:
+
+```bash
+ldd ~/.local/bin/ludotrace-linux-headless   # "not a dynamic executable"
+```
+
+## 2. Open the wallet, then sign in
 
 Sign-in needs a browser and a tray button, so it happens in Desktop Mode. The
 daemon in Gaming Mode then has to read that same token back — and on the Deck's
@@ -76,7 +95,17 @@ Secret Service interface"** is enabled.
 > a token this app wrote in the clear. If that trade is unacceptable, keep the
 > wallet password and accept that uploads only run in Desktop Mode.
 
-Then run the binary normally (no `--headless`) and click **Sign In**.
+Then sign in. The headless build has no tray, so this is a one-shot command
+rather than a menu item — it opens your browser and waits for you to finish:
+
+```bash
+~/.local/bin/ludotrace-linux-headless --sign-in
+```
+
+`signed in; token stored in the OS keychain` is what you want. If it instead
+says the token **could not be saved**, the wallet is still locked — fix that
+above and run it again, because a token that was not written is gone the moment
+the command exits.
 
 Verify the token is readable the way the service will read it — a plain
 `busctl` presence check is not enough, because a *locked* wallet still answers:
@@ -95,16 +124,6 @@ is step 6: start the service in Gaming Mode and read the journal. A repeating
 case.
 
 [valve928]: https://github.com/ValveSoftware/SteamOS/issues/928
-
-## 2. Install the binary
-
-Download `ludotrace-linux` from the [latest release][releases], or from a CI run's
-`ludotrace-linux` artifact for an untagged build.
-
-```bash
-mkdir -p ~/.local/bin
-install -m 755 ~/Downloads/ludotrace-linux ~/.local/bin/ludotrace-linux
-```
 
 ## 3. Find the Fallout 4 install directory
 
@@ -298,7 +317,7 @@ Environment=LUDOTRACE_LOG_LEVEL=debug
 systemctl --user disable --now ludotrace.service
 rm ~/.config/systemd/user/ludotrace.service
 systemctl --user daemon-reload
-rm ~/.local/bin/ludotrace-linux
+rm ~/.local/bin/ludotrace-linux-headless
 ```
 
 State in `~/.config/ludotrace` (config, queue, offsets) is left in place; delete

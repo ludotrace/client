@@ -16,6 +16,14 @@ import (
 	"github.com/ludotrace/client/internal/version"
 )
 
+// testPlatformKey mirrors the key Check looks up, including the build variant.
+// Hardcoding "GOOS/GOARCH" here would pass under the default tags and fail
+// under -tags headless, where the manifest key carries a "-headless" suffix so
+// a headless build never downloads the GTK-linked binary.
+func testPlatformKey() string {
+	return runtime.GOOS + "/" + runtime.GOARCH + platformVariant
+}
+
 func TestParseSemver(t *testing.T) {
 	cases := []struct {
 		input   string
@@ -76,9 +84,9 @@ func TestIsNewer(t *testing.T) {
 	}{
 		{"v1.3.0", "v1.2.0", true},
 		{"1.3.0", "1.2.0", true},
-		{"v99.0.0", "v99.0.0", false},      // equal — the already-applied case
-		{"v1.0.0", "v1.0.1", false},        // older
-		{"v99.0.0", "dev", false},          // running a dev build → never auto-prompt
+		{"v99.0.0", "v99.0.0", false},         // equal — the already-applied case
+		{"v1.0.0", "v1.0.1", false},           // older
+		{"v99.0.0", "dev", false},             // running a dev build → never auto-prompt
 		{"v1.0.0-3-gabcdef", "v1.0.0", false}, // staged is a dirty build
 	}
 	for _, c := range cases {
@@ -180,7 +188,7 @@ func TestCheckSkipsDevBuild(t *testing.T) {
 	// version.Version defaults to "dev" in tests (no ldflags), so Check should
 	// short-circuit on the version gate regardless of manifest content.
 	manifest := fmt.Sprintf(`{"version":"99.0.0","next_check_seconds":3600,"platforms":{%q:{"url":"http://example/bin","sha256":"abc"}}}`,
-		runtime.GOOS+"/"+runtime.GOARCH)
+		testPlatformKey())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(manifest))
 	}))
@@ -205,7 +213,7 @@ func TestCheckFindsNewerRelease(t *testing.T) {
 	defer func() { version.Version = orig }()
 
 	manifest := fmt.Sprintf(`{"version":"1.3.0","next_check_seconds":7200,"platforms":{%q:{"url":"http://example/bin","sha256":"abc"}}}`,
-		runtime.GOOS+"/"+runtime.GOARCH)
+		testPlatformKey())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(manifest))
 	}))

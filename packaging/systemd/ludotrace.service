@@ -18,11 +18,14 @@ StartLimitBurst=5
 [Service]
 Type=simple
 
-# --headless is required, not optional. The Linux tray is cgo GTK3, and
-# gtk_init exits the process when it cannot open a display — which is every
-# Gaming Mode session, and every systemd unit with no desktop environment.
-# Drop the flag and this unit crash-loops until StartLimitBurst stops it.
-ExecStart=%h/.local/bin/ludotrace-linux --headless
+# ludotrace-linux-headless, not ludotrace-linux. The latter is built with cgo
+# and links libgtk-3 and libayatana-appindicator3; SteamOS ships neither, so the
+# loader kills it before main runs and --headless cannot help — that link is
+# resolved at exec. The headless build is static and needs nothing installed.
+#
+# The flag is redundant for that binary (it pins headless mode at build time)
+# and is kept so the unit still behaves if pointed at the normal Linux build.
+ExecStart=%h/.local/bin/ludotrace-linux-headless --headless
 
 # on-failure, not always: a clean SIGTERM exits 0 (the client flushes its open
 # session on the way out), so stopping the service must not restart it.

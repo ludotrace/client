@@ -119,7 +119,7 @@ func (u *Updater) Check(ctx context.Context) (*Update, time.Duration, error) {
 		return nil, interval, nil
 	}
 
-	key := runtime.GOOS + "/" + runtime.GOARCH
+	key := runtime.GOOS + "/" + runtime.GOARCH + platformVariant
 	p, ok := m.Platforms[key]
 	if !ok {
 		slog.Debug("updater: no binary for platform, skipping", "platform", key)

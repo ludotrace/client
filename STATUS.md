@@ -49,7 +49,10 @@ Confirmed by manual end-to-end test or observed running.
 
 ## Implemented, not yet validated
 
-- Headless mode (`--headless`) — runs with no tray for hosts with no display, draining the tray's event channels so the upload worker cannot wedge; verified on a no-DISPLAY/no-D-Bus Linux host, not yet on a Steam Deck
+- Headless mode (`--headless`) — runs with no tray for hosts with no display, draining the tray's event channels so the upload worker cannot wedge; verified on a no-DISPLAY/no-D-Bus Linux host
+- Headless Linux build (`make build-linux-headless`) — `-tags headless` + `CGO_ENABLED=0`, dropping systray and sqweek/dialog for a static binary with no GTK link; required on SteamOS, which ships no `libayatana-appindicator3`. CI asserts it stays static
+- `--sign-in` / `--sign-out` one-shots — browser sign-in without a tray, the only way to authenticate a headless install
+- Headless builds take the `linux/amd64-headless` update-manifest key, so they cannot self-update into the GTK-linked binary
 - Steam Deck deployment — systemd user unit in `packaging/systemd/`, runbook in `docs/steam-deck.md`; Gaming Mode needs the KDE wallet given a blank password, since auto-login cannot unlock it and `ksecretd` is the only token store on Linux. Unverified on real hardware
 - Linux binary published as a CI artifact (`ludotrace-linux`) on every push, alongside the existing release-tag asset
 - Bounded upload queue — age-based drop-oldest, newest-first upload (#60)

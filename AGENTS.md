@@ -255,6 +255,24 @@ It is not cosmetic. `getlantern/systray`'s Linux backend is cgo GTK3, and
 the daemon dies at `tray.Run()` before it has watched anything, and a unit with
 `Restart=on-failure` crash-loops.
 
+**The flag is not enough on SteamOS.** `libgtk-3` and `libayatana-appindicator3`
+are linked into the binary whether or not a tray is drawn, and SteamOS ships
+neither, so the loader kills it before `main`. `make build-linux-headless`
+(`-tags headless`, `CGO_ENABLED=0`) drops `systray` and `sqweek/dialog` and
+produces a static binary — that is what runs on a Deck, and CI asserts it stays
+static. The tag files are `internal/tray/tray_gui.go` / `tray_nogui.go` and
+`cmd/ludotrace/addgame_gui.go` / `addgame_headless.go`; `tray.go` and `main.go`
+must stay compilable with the tag on.
+
+A headless build pins headless mode on regardless of flags
+(`cmd/ludotrace/mode_headless.go`), and takes a **different auto-update manifest
+key** (`linux/amd64-headless`, via `internal/updater/variant*.go`) so it can
+never download the GTK-linked binary over itself.
+
+Sign In and Add Game are tray actions, so the headless build exposes `--sign-in`
+and `--sign-out` one-shots instead; on a Deck there is no tray build that runs at
+all, so those are the only way to authenticate.
+
 `tray.RunHeadless` takes `Run`'s place as main's blocking call. It drains the
 same channels the systray event loop would: `stateCh` is buffered 8, so with no
 consumer the ninth `SetState` would block the upload worker permanently.
