@@ -205,9 +205,21 @@ core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id     = "fallout4"
-watch_path  = "C:/Users/Username/Documents/My Games/Fallout4"
-events_file = "lt_fo4_events.jsonl"
+watch_path  = "C:/Program Files (x86)/Steam/steamapps/common/Fallout 4"
+events_file = "lt_fallout4_events.jsonl"
 ```
+
+`watch_path` is the game's **install** folder. Both currently-known games' mods
+write the events file there — Fallout 4's Papyrus mod passes a bare filename to
+`Hydra:IO:File.AppendLine`, which resolves against the game root, so
+`Documents/My Games/Fallout4` holds F4SE and Hydra's logs but never our events
+file. See `internal/_bmad-output/specs/spec-add-game-dialog/known-games-registry.md`.
+
+`events_file` is always recomputed from `game_id` by `config.EventsFileName`
+(`lt_<game_id>_events.jsonl`) and the configured value is overwritten on load —
+it is in the example for readability only. A game whose `watch_path` is missing
+or is not a directory is dropped at load with a warning, so a wrong path watches
+nothing rather than failing loudly.
 
 **Never edit a real user config, queue, or offset file to test something** — it corrupts the
 very state you're trying to observe. See root `AGENTS.md` § Debugging discipline.
@@ -227,7 +239,45 @@ QUEUE_MAX_AGE_DAYS=30   # max age before a queued session is dropped, oldest fir
 make build-all     # mac (amd64 + arm64), windows, linux
 ```
 
-The Linux build needs `libgtk-3-dev`, `libappindicator3-dev` (systray) and `gnome-keyring`.
+The Linux build needs `libgtk-3-dev`, `libayatana-appindicator3-dev` (systray) and
+`gnome-keyring`. The ayatana package is the one to install — plain
+`libappindicator3-dev` is the deprecated predecessor and is not what CI or the
+Makefile use.
+
+### Headless mode
+
+`--headless` runs the daemon with no tray, for a host with no display or
+StatusNotifier host: SteamOS Gaming Mode, a systemd user service, a container.
+Deployment runbook in `docs/steam-deck.md`; the unit is in `packaging/systemd/`.
+
+It is not cosmetic. `getlantern/systray`'s Linux backend is cgo GTK3, and
+`gtk_init` **exits the process** on "cannot open display" — so without the flag
+the daemon dies at `tray.Run()` before it has watched anything, and a unit with
+`Restart=on-failure` crash-loops.
+
+`tray.RunHeadless` takes `Run`'s place as main's blocking call. It drains the
+same channels the systray event loop would: `stateCh` is buffered 8, so with no
+consumer the ninth `SetState` would block the upload worker permanently.
+Anything added to the tray's event loop needs a counterpart there — and
+anything that is a *menu action* (Sign In, Add Game, Retry Now) has no headless
+path at all, so the user must do it from a desktop session first.
+
+**On Linux the token has no on-disk fallback.** `internal/keychain` falls back to
+an encrypted file on Windows only (DPAPI, so the OS holds the key); on Linux it
+deliberately refuses to write a plaintext token, so the token lives solely in the
+keyring providing `org.freedesktop.secrets`. A host without one still captures
+and queues, but cannot upload.
+
+The two failures differ, and only one is quiet: a reachable-but-empty keyring
+returns `ErrNotSignedIn` and the upload worker parks on `waitForSignIn`, while an
+unreachable or locked one returns an unclassified error and retries every 5s,
+logging each time. The second is the Steam Deck case — SteamOS has a provider
+(`ksecretd`, D-Bus activated) but auto-login leaves the wallet locked, so it must
+be given a blank password. See `docs/steam-deck.md` step 1.
+
+`go-keyring` stores under attributes `service=ludotrace`, `username=opaque_token`
+— that is the `secret-tool lookup` form, and it does not match the `account`
+constant name in `keychain.go`.
 
 The Windows build is `-H=windowsgui` and has no console, so it emits nothing to a terminal.
 **When something doesn't work there, restoring a signal is the first task** — a fix without

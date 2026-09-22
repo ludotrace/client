@@ -26,20 +26,28 @@ Sessions that end abruptly (crash, force-quit) are uploaded after 12 minutes of 
 
 ## Install
 
-Download `ludotrace.exe` from the [latest CI build](https://github.com/ludotrace/client/actions) under **Artifacts**.
+Download a binary from the [latest release](https://github.com/ludotrace/client/releases/latest) — `ludotrace.exe` (Windows), `ludotrace-mac-x64` / `ludotrace-mac-arm64` (macOS), or `ludotrace-linux`. Untagged builds are also published as CI artifacts on each [workflow run](https://github.com/ludotrace/client/actions).
 
-Create `%APPDATA%\ludotrace\config.toml`:
+Create `%APPDATA%\ludotrace\config.toml` (`~/.config/ludotrace/config.toml` on macOS/Linux):
 
 ```toml
 core_url = "https://core.ludotrace.com"
 
 [[games]]
 game_id     = "fallout4"
-watch_path  = "C:\\Users\\You\\Documents\\My Games\\Fallout4"
-events_file = "lt_fo4_events.jsonl"
+watch_path  = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fallout 4"
+events_file = "lt_fallout4_events.jsonl"
 ```
 
+`watch_path` is the game's **install** folder — the mod writes the events file there, not into `Documents\My Games`. `events_file` is derived from `game_id` (`lt_<game_id>_events.jsonl`) and overwritten on load.
+
 Run `ludotrace.exe` — it appears in the system tray. Click **Sign In** to authenticate.
+
+### Steam Deck / headless Linux
+
+`--headless` runs the daemon with no tray, for hosts with no display — SteamOS Gaming Mode, a systemd user service, a container. Without it the Linux binary exits at startup (`gtk_init` cannot open a display).
+
+See **[docs/steam-deck.md](docs/steam-deck.md)** for the full Steam Deck setup, including the systemd user unit in [`packaging/systemd/`](packaging/systemd/ludotrace.service).
 
 ### Unsigned binary warnings
 
@@ -72,7 +80,7 @@ make build-windows       # → dist/ludotrace.exe
 make build-mac           # → dist/ludotrace-mac-x64
 make build-mac-arm       # → dist/ludotrace-mac-arm64
 
-# Linux (requires libgtk-3-dev libappindicator3-dev)
+# Linux (requires libgtk-3-dev libayatana-appindicator3-dev)
 make build-linux         # → dist/ludotrace-linux
 
 # Tests
