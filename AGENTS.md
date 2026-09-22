@@ -264,8 +264,12 @@ path at all, so the user must do it from a desktop session first.
 
 **On Linux the token has no on-disk fallback.** `internal/keychain` falls back to
 an encrypted file on Windows only; on Linux it deliberately refuses to write a
-plaintext token, so the token lives solely in the Secret Service. A headless host
-without one runs fine but parks signed out.
+plaintext token, so the token lives solely in the keyring providing
+`org.freedesktop.secrets`. A host without one still captures and queues, but
+cannot upload — and note the two failures differ: a reachable-but-empty keyring
+returns `ErrNotSignedIn` and the upload worker parks on `waitForSignIn`, while an
+unreachable one returns an unclassified error and retries every 5s, logging each
+time. The second is the Steam Deck case.
 
 The Windows build is `-H=windowsgui` and has no console, so it emits nothing to a terminal.
 **When something doesn't work there, restoring a signal is the first task** — a fix without

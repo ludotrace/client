@@ -43,10 +43,12 @@ service.
 Switch to Desktop Mode, run the binary normally (no `--headless`), and click
 **Sign In** in the tray.
 
-> **On Linux the token is only ever in the Secret Service.** Unlike Windows,
-> there is no encrypted on-disk fallback — the client deliberately refuses to
-> write a token as plaintext. If the Secret Service is not reachable in Gaming
-> Mode, the daemon runs but parks signed out. See the troubleshooting section.
+> **On Linux the token is only ever in the keyring.** Unlike Windows, there is no
+> encrypted on-disk fallback — the client deliberately refuses to write a token
+> as plaintext. So if the keyring that holds it is not reachable from the session
+> the service runs in, the token cannot be read back and nothing uploads, even
+> though sign-in succeeded. Capture keeps working regardless. See
+> [Nothing uploads](#nothing-uploads).
 
 ## 2. Install the binary
 
@@ -163,32 +165,52 @@ Games are dropped with `config: skipping game with missing or non-directory
 watch_path`. Re-check step 3 — quoting the space in `Fallout 4` is the usual
 culprit.
 
-**`client state — sign in from a desktop session to resume uploads`.** The
-daemon is running but has no usable token, so uploads are parked. Nothing is
-lost — sessions keep queueing to disk and go out once you are signed in.
+### Nothing uploads
 
-This is also what you see if sign-in *did* work in Desktop Mode but the Secret
-Service is not reachable in Gaming Mode: there is no on-disk fallback on Linux,
-so the token is simply unreadable. The giveaway is a `keychain: load:` error
-rather than a plain "not signed in":
+Capture is unaffected in both cases below: the watcher still sees writes,
+sessions are still extracted, and they queue to disk. Nothing is dropped until
+`QUEUE_MAX_AGE_DAYS` (default 30), and the backlog goes out once a token is
+readable. These are upload-side failures only.
+
+They look different in the log, and the difference tells you which one you have.
+
+**No token stored — `client state — sign in from a desktop session to resume
+uploads`, once, at startup.** Nobody has signed in on this machine. The upload
+worker stops and waits for a sign-in, which headless cannot offer, so it goes
+quiet rather than retrying. Sign in from Desktop Mode (step 1).
+
+**Token unreadable — `failed to get auth token`, repeating every 5 seconds.**
+Sign-in *did* work in Desktop Mode, but the keyring holding the token is not
+reachable from the session the unit runs in. The client cannot tell this apart
+from a transient fault, so it retries indefinitely instead of waiting:
 
 ```json
 {"level":"WARN","msg":"failed to get auth token",
  "err":"auth: load opaque token: keychain: load: ..."}
 ```
 
-Check whether a Secret Service is running in the session the unit lives in:
+A `keychain:` error inside `err` is the giveaway — a plain "not signed in" is the
+case above. Expect roughly 17k of these a day while anything is queued;
+`ludotrace.log` rotates at 5 MiB so it will not fill the disk, but it will bury
+everything else.
+
+This is the one Linux-specific gap worth knowing about. On Windows the client
+falls back to an encrypted file when the OS credential store refuses; on Linux it
+deliberately does not, because the only thing it could encrypt with is the key
+store that is missing — so it declines to write a plaintext token instead. The
+token therefore lives in exactly one place: whichever keyring daemon provides
+`org.freedesktop.secrets` on the session bus. Desktop Mode has KDE's; Gaming Mode
+may not.
+
+Check which session has one:
 
 ```bash
 busctl --user list | grep -i secrets
 ```
 
-Nothing listed means no provider is running. Switch to Desktop Mode (which runs
-KDE's, and therefore has one) to confirm the account is signed in, and treat a
-Gaming-Mode-only failure as this and not as a bad token.
-
-Queued sessions are safe throughout — they stay on disk and upload once a token
-is readable again.
+Nothing listed means no provider is running there. Confirm from Desktop Mode that
+the account really is signed in, and treat a Gaming-Mode-only failure as this
+rather than as a bad token.
 
 **`client state — no games configured`.** `config.toml` is missing or has no
 `[[games]]` block that survived validation. Add Game is a tray action and is
