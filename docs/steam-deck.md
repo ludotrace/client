@@ -168,6 +168,29 @@ so this is usually unnecessary:
 sudo loginctl enable-linger $USER
 ```
 
+### If the game is on an SD card
+
+A Steam library on an SD card mounts at some point during login, and the service
+may start first. `watch_path` then does not exist yet, `filterGames` drops the
+game with a warning, and the daemon watches nothing until something restarts it
+— `"games":0` after every reboot, with no obvious cause.
+
+Tell systemd to wait for the mount:
+
+```bash
+mkdir -p ~/.config/systemd/user/ludotrace.service.d
+cat > ~/.config/systemd/user/ludotrace.service.d/sdcard.conf <<'EOF'
+[Unit]
+RequiresMountsFor=/run/media/deck/YOUR_CARD
+EOF
+systemctl --user daemon-reload
+systemctl --user restart ludotrace.service
+```
+
+Use the path `libraryfolders.vdf` declares (step 3). A card often also appears at
+`/run/media/<label>` without the user component; that is a compatibility
+symlink, and the canonical path is the one to depend on.
+
 ## 6. Verify
 
 ```bash
