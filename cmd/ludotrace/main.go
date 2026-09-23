@@ -23,8 +23,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sqweek/dialog"
-
 	"github.com/ludotrace/client/internal/auth"
 	"github.com/ludotrace/client/internal/autostart"
 	"github.com/ludotrace/client/internal/config"
@@ -59,8 +57,9 @@ func main() {
 	}
 
 	// Decided before anything starts so the tray is never constructed on a host
-	// that cannot draw one. See headlessArg.
-	headless := hasArg(os.Args, headlessArg)
+	// that cannot draw one. See headlessArg. A build made with -tags headless
+	// has no tray to construct at all, so it pins this on regardless of flags.
+	headless := builtHeadless || hasArg(os.Args, headlessArg)
 
 	// --check-update: one-shot. Runs the same Check+Stage path as the
 	// background worker, logs the outcome, and exits. Does not take the
@@ -68,6 +67,18 @@ func main() {
 	// instance. Intended for development testing and ops diagnostics.
 	if len(os.Args) >= 2 && os.Args[1] == "--check-update" {
 		os.Exit(runCheckUpdate())
+	}
+
+	// --sign-in / --sign-out: one-shots for a host with no tray. Sign In is
+	// otherwise a tray-only action, which leaves a headless install with no way
+	// to authenticate at all — and on a Steam Deck the tray build cannot even
+	// start, so there is no "just do it from the desktop build" fallback. These
+	// need only a browser, which Desktop Mode has.
+	if len(os.Args) >= 2 && os.Args[1] == "--sign-in" {
+		os.Exit(runSignIn())
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "--sign-out" {
+		os.Exit(runSignOut())
 	}
 
 	// Flash the launch splash on an interactive (double-click) launch. A
@@ -371,6 +382,80 @@ func checkAndStage(ctx context.Context, u *updater.Updater) (*updater.Update, st
 		return upd, "", next
 	}
 	return upd, pendingPath, next
+}
+
+// newAuthClient wires the keychain-backed auth client the one-shots share with
+// main. Kept separate so --sign-in and --sign-out cannot drift from the client
+// the daemon itself uses to read the token back.
+func newAuthClient() (auth.Client, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	credPath, err := config.CredentialPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve credential path: %w", err)
+	}
+	return auth.New(auth.Config{CoreURL: cfg.CoreURL}, keychain.New(credPath)), nil
+}
+
+// runSignIn is the --sign-in one-shot: open the browser, wait for Core's
+// loopback callback, store the token, exit. Returns a process exit code.
+//
+// It deliberately does not take the singleton lock, so it can be run against a
+// machine whose service is already up — the daemon notices the new token on its
+// next attempt without a restart.
+//
+// The exit code distinguishes "signed in" from "signed in but the token was not
+// saved", because only the first is any use to a service that will start later
+// in a different session. On Linux there is no on-disk fallback, so an
+// unwritable keyring means the sign-in evaporates when this process exits, and
+// saying so here is the difference between a five-second fix and an hour of
+// reading logs.
+func runSignIn() int {
+	authClient, err := newAuthClient()
+	if err != nil {
+		slog.Error("sign-in: setup failed", "err", err)
+		return 1
+	}
+
+	slog.Info("opening your browser to sign in — complete it there, then return here")
+	err = authClient.SignIn(context.Background())
+	switch {
+	case err == nil:
+		slog.Info("signed in; token stored in the OS keychain")
+		return 0
+
+	case errors.Is(err, auth.ErrSignedInDegraded):
+		slog.Warn("signed in, but the OS keychain was unavailable — token went to the encrypted fallback", "err", err)
+		return 0
+
+	case errors.Is(err, auth.ErrSignedInNotPersisted):
+		slog.Error("signed in, but the token could NOT be saved, so it is gone when this exits",
+			"err", err,
+			"fix", "unlock the OS keychain (on a Steam Deck: give the KDE wallet a blank password), then run --sign-in again")
+		return 2
+
+	default:
+		slog.Error("sign-in failed", "err", err)
+		return 1
+	}
+}
+
+// runSignOut is the --sign-out one-shot: drop the stored token and tell Core to
+// revoke it. Returns a process exit code.
+func runSignOut() int {
+	authClient, err := newAuthClient()
+	if err != nil {
+		slog.Error("sign-out: setup failed", "err", err)
+		return 1
+	}
+	if err := authClient.SignOut(context.Background()); err != nil {
+		slog.Error("sign-out failed", "err", err)
+		return 1
+	}
+	slog.Info("signed out")
+	return 0
 }
 
 // runCheckUpdate is the --check-update one-shot. It performs a single
@@ -1044,112 +1129,6 @@ type alreadyAddedError struct {
 
 func (e *alreadyAddedError) Error() string {
 	return fmt.Sprintf("%s is already added", e.displayName)
-}
-
-// notifyGameAdded/notifyGameInfo/notifyGameError surface the outcome of an
-// Add Game action as a native modal dialog. The tray menu closes the instant
-// its item is clicked, so a menu-item title is never seen in the moment — a
-// modal is the only feedback a non-technical user reliably notices, and the
-// picker already proves native dialogs work from this handler goroutine.
-// These run on the (already off-tray-loop) handler goroutine and block until
-// dismissed, which harmlessly keeps triggerAddGame's in-flight guard set so a
-// second click can't start a parallel run behind the dialog.
-func notifyGameAdded(gameName string) {
-	dialog.Message("%s was added and is now being tracked.", gameName).
-		Title("LudoTrace — Game Added").Info()
-}
-
-func notifyGameInfo(msg string) {
-	dialog.Message("%s", msg).Title("LudoTrace — Add Game").Info()
-}
-
-func notifyGameError(err error) {
-	dialog.Message("Add Game failed:\n\n%s", err).Title("LudoTrace — Add Game").Error()
-}
-
-// resolveNewGame runs the two-stage Add Game flow and returns the game to
-// add. A nil game with a nil error means the user cancelled — the caller
-// shows neither a confirmation nor a failure.
-func resolveNewGame(ctx context.Context, cfg *config.Config, authClient auth.Client) (*config.Game, error) {
-	discovered, err := steam.Discover()
-	if err != nil {
-		slog.Warn("steam discovery failed", "err", err)
-	}
-	if newGames := steam.DedupeNew(discovered, cfg.Games); len(newGames) > 0 {
-		return &newGames[0], nil
-	}
-
-	picked, err := dialog.Directory().Title("Select Game Folder").SetStartDir(pickerStartDir()).Browse()
-	if err != nil {
-		if errors.Is(err, dialog.ErrCancelled) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("folder picker: %w", err)
-	}
-	if picked == "" {
-		// Belt-and-suspenders: every sqweek/dialog backend is expected to
-		// return ErrCancelled on cancel (handled above), but an empty path
-		// reaching filepath.Base("") -> "." would otherwise flow into
-		// folder-matching as if "." had been picked. Treat it as a cancel.
-		return nil, nil
-	}
-
-	folderName := filepath.Base(picked)
-	if kg, ok := steam.MatchFolder(folderName); ok {
-		g := steam.GameFromFolder(kg, picked)
-		if gameConfigured(cfg.Games, g.GameID) {
-			return nil, &alreadyAddedError{displayName: kg.DisplayName}
-		}
-		return &g, nil
-	}
-
-	// Unrecognized folder: the dropdown of known games comes from Core's
-	// GET /v1/games (client#29), not a compile-time list, so a game added to
-	// Core's registry appears here without a client release. sqweek/dialog
-	// has no native list-selection widget, so each remaining candidate is
-	// offered as a Yes/No prompt instead of a real dropdown (see the spec's
-	// Design Notes for why). The picked folder itself becomes watch_path —
-	// these games' watch paths aren't Steam-derivable, so there is no
-	// per-game default-path table; the events-file name follows from game_id.
-	knownGames, err := knowngames.List(ctx, cfg.CoreURL, authClient)
-	if err != nil {
-		return nil, fmt.Errorf("could not load known games list: %w", err)
-	}
-	offered := false
-	for _, kg := range knownGames {
-		if gameConfigured(cfg.Games, kg.GameID) {
-			continue
-		}
-		offered = true
-		prompt := fmt.Sprintf("The folder %q wasn't recognized automatically.\n\nAdd it as %q?", folderName, kg.Name)
-		if dialog.Message("%s", prompt).Title("Unrecognized Folder").YesNo() {
-			g := steam.GameFromID(kg.GameID, picked)
-			return &g, nil
-		}
-	}
-	if !offered {
-		// Every known game is already configured — there was nothing left
-		// to offer. Without this, the loop above silently returns (nil,
-		// nil) and the user sees no feedback at all after picking a folder.
-		return nil, &alreadyAddedError{displayName: "every supported game"}
-	}
-	return nil, nil
-}
-
-// pickerStartDir defaults to Steam's common library folder when detected
-// (Windows only), else the user's home directory. See the I/O matrix's
-// "Registry read fails" row and the non-Windows acceptance criterion.
-func pickerStartDir() string {
-	if dir, ok := steam.DefaultBrowseDir(); ok {
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			return dir
-		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return home
 }
 
 func gameConfigured(games []config.Game, gameID string) bool {

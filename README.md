@@ -45,7 +45,14 @@ Run `ludotrace.exe` — it appears in the system tray. Click **Sign In** to auth
 
 ### Steam Deck / headless Linux
 
-`--headless` runs the daemon with no tray, for hosts with no display — SteamOS Gaming Mode, a systemd user service, a container. Without it the Linux binary exits at startup (`gtk_init` cannot open a display).
+Use **`ludotrace-linux-headless`**: built without the tray and without cgo, so it is statically linked and runs anywhere. The regular `ludotrace-linux` links `libgtk-3` and `libayatana-appindicator3`, which SteamOS does not ship — there it fails to start at all, and `--headless` cannot help because that link is resolved before any code runs.
+
+It has no tray, so sign-in is a command rather than a menu item:
+
+```bash
+ludotrace-linux-headless --sign-in     # opens your browser
+ludotrace-linux-headless --sign-out
+```
 
 See **[docs/steam-deck.md](docs/steam-deck.md)** for the full Steam Deck setup, including the systemd user unit in [`packaging/systemd/`](packaging/systemd/ludotrace.service).
 
@@ -82,6 +89,9 @@ make build-mac-arm       # → dist/ludotrace-mac-arm64
 
 # Linux (requires libgtk-3-dev libayatana-appindicator3-dev)
 make build-linux         # → dist/ludotrace-linux
+
+# Linux, no tray — static, no cgo, no GTK. Runs on SteamOS.
+make build-linux-headless  # → dist/ludotrace-linux-headless
 
 # Tests
 make test

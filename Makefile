@@ -1,4 +1,4 @@
-.PHONY: build build-mac build-mac-arm build-windows build-linux build-all test lint clean
+.PHONY: build build-mac build-mac-arm build-windows build-linux build-linux-headless build-all test lint clean
 
 BINARY  := ludotrace
 DIST    := dist
@@ -41,7 +41,20 @@ build-linux:
 	rm -f $(DIST)/$(BINARY)-linux
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY)-linux $(PKG)
 
-build-all: build-mac build-mac-arm build-windows build-linux
+# No tray, and therefore no cgo: -tags headless drops systray and sqweek/dialog,
+# which are the only reason the normal Linux build links GTK. CGO_ENABLED=0 then
+# yields a static binary with no shared-library dependencies at all.
+#
+# That is the point, not a bonus. SteamOS ships no libayatana-appindicator3, so
+# dist/$(BINARY)-linux cannot start there — the loader fails before main runs,
+# and --headless cannot help because the link is resolved at exec. This target
+# is what runs on a Steam Deck; see docs/steam-deck.md.
+build-linux-headless:
+	mkdir -p $(DIST)
+	rm -f $(DIST)/$(BINARY)-linux-headless
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags headless -ldflags "$(LDFLAGSBASE)" -o $(DIST)/$(BINARY)-linux-headless $(PKG)
+
+build-all: build-mac build-mac-arm build-windows build-linux build-linux-headless
 
 # Requires CGo + GTK deps (see build-linux comment) — cmd/ludotrace and
 # internal/tray both link systray/dialog.

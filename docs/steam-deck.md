@@ -16,94 +16,83 @@ shapes everything below.
 |---|---|
 | Watching, extracting, queueing, uploading | Works — this is the whole daemon |
 | Tray icon and menu | Not available — use `--headless` |
-| Sign In | **Do this first, from Desktop Mode** — it needs a browser |
+| Sign In | Desktop Mode, `--sign-in` — needs a browser once |
 | Add Game | Not available — write `config.toml` by hand (below) |
+| Sign Out | `--sign-out` |
 | Auto-update | Downloads and stages, but applies on the next service restart |
 
-`--headless` is not a convenience flag. The Linux tray is cgo GTK3, and
-`gtk_init` **exits the process** when it cannot open a display:
+**Use the `ludotrace-linux-headless` build.** SteamOS does not ship
+`libayatana-appindicator3`, which the normal Linux binary links for its tray, so
+that binary cannot start on a Deck at all:
 
 ```
-(ludotrace-linux:3811): Gtk-WARNING **: cannot open display:
-$ echo $?
-1
+ludotrace-linux: error while loading shared libraries:
+libayatana-appindicator3.so.1: cannot open shared object file
 ```
 
-Without the flag the daemon dies at startup having watched nothing, and
-`Restart=on-failure` turns that into a crash loop.
+The `--headless` flag does not help, because that link is resolved by the loader
+before any code runs. The headless build is compiled without the tray and
+without cgo, so it is statically linked and needs nothing installed.
 
 ---
 
-## 1. Sign in from Desktop Mode, and make the wallet openable
+## 1. Install the binary
 
-Sign-in needs a browser and a tray button, so it happens in Desktop Mode. The
-daemon in Gaming Mode then has to read that same token back — and on the Deck's
-default settings it cannot, for a reason worth fixing before you go any further.
-
-**On Linux the token is only ever in the keyring.** Unlike Windows there is no
-encrypted on-disk fallback: the client deliberately refuses to write a token as
-plaintext (`internal/keychain/fallback_other.go`). So the token is readable only
-where the keyring is both *reachable* and *unlocked*.
-
-Reachable is fine. SteamOS 3.8 ships Plasma 6, whose Secret Service provider is
-`ksecretd` (KWallet has served `org.freedesktop.secrets` since KDE Frameworks
-5.97). It is D-Bus activated, so it does not need a Plasma session running — a
-session bus is enough, and Gaming Mode has one. The well-known
-"[no keyring on SteamOS][valve928]" complaint is about *gnome-keyring*
-specifically; KDE's own provider is present.
-
-**Unlocked is the problem.** The Deck auto-logs-in, so no password is ever
-typed, so `kwallet-pam` has nothing to unlock the wallet with. A
-password-protected wallet can then only be opened by someone typing the password
-into a prompt — which is exactly what Gaming Mode has nobody to do.
-
-So do one of these in Desktop Mode **before** enabling the service:
-
-- **Give the wallet a blank password** (System Settings → KDE Wallet → change
-  password, leave it empty). An empty-password wallet opens without prompting,
-  in any session. This is the usual Deck workaround and the one that survives a
-  mode switch.
-- **Or disable auto-login**, so `kwallet-pam` can unlock the wallet with the
-  password you type at boot.
-
-While you are in System Settings → KDE Wallet, confirm **"Use KWallet for the
-Secret Service interface"** is enabled.
-
-> A blank-password wallet is protected at rest by file permissions rather than a
-> passphrase (`~/.local/share/kwalletd/*.kwl`, mode 0600). That is a real
-> trade-off, and close to the protection the client declines to implement itself
-> — the difference being that it is the OS's store, under the user's control, not
-> a token this app wrote in the clear. If that trade is unacceptable, keep the
-> wallet password and accept that uploads only run in Desktop Mode.
-
-Then run the binary normally (no `--headless`) and click **Sign In**.
-
-Verify the token is readable the way the service will read it — a plain
-`busctl` presence check is not enough, because a *locked* wallet still answers:
-
-```bash
-secret-tool lookup service ludotrace username opaque_token
-```
-
-Printing the token means Gaming Mode will be able to read it too. An error, an
-empty result, or a password prompt means it will not.
-
-`secret-tool` comes from `libsecret` and may not be present on a stock SteamOS
-image, which is read-only by default. If it is missing, skip it — the real test
-is step 6: start the service in Gaming Mode and read the journal. A repeating
-`failed to get auth token` with a `keychain:` error in it is the locked-wallet
-case.
-
-[valve928]: https://github.com/ValveSoftware/SteamOS/issues/928
-
-## 2. Install the binary
-
-Download `ludotrace-linux` from the [latest release][releases], or from a CI run's
-`ludotrace-linux` artifact for an untagged build.
+Download **`ludotrace-linux-headless`** from the [latest release][releases], or
+from a CI run's `ludotrace-linux-headless` artifact for an untagged build. Not
+`ludotrace-linux` — that one will not start here.
 
 ```bash
 mkdir -p ~/.local/bin
-install -m 755 ~/Downloads/ludotrace-linux ~/.local/bin/ludotrace-linux
+install -m 755 ~/Downloads/ludotrace-linux-headless ~/.local/bin/ludotrace-linux-headless
+```
+
+It is static, so there is nothing else to install and nothing to check:
+
+```bash
+ldd ~/.local/bin/ludotrace-linux-headless   # "not a dynamic executable"
+```
+
+## 2. Sign in
+
+Sign-in needs a browser, so it happens in Desktop Mode. The headless build has
+no tray, so it is a one-shot command rather than a menu item:
+
+```bash
+~/.local/bin/ludotrace-linux-headless --sign-in
+```
+
+Your browser opens; finish there and come back. `signed in; token stored` is
+what you want.
+
+### Where the token goes, and why it is not the keyring
+
+SteamOS has **no Secret Service provider at all** — `org.freedesktop.secrets` is
+not even activatable, in either mode:
+
+```
+keychain: save: The name is not activatable
+```
+
+That is not a locked wallet, and no KDE Wallet setting fixes it; there is
+nothing installed to unlock. So the client falls back to sealing the token with
+`systemd-creds --user`, which encrypts against a key the OS holds — TPM2-backed
+on a Deck. The sealed blob lands in `~/.config/ludotrace/`, and the key is never
+in the file, the binary, or beside the ciphertext.
+
+That keeps the rule the other platforms keep (Windows uses DPAPI for the same
+reason) rather than writing the token in the clear, which the client refuses to
+do. `--with-key=tpm2` is deliberately *not* used: addressing the TPM directly
+needs interactive authorization a background service can never give, while user
+scope needs no root, no `tss` group and no prompt.
+
+Needs systemd 256 or newer; SteamOS 3.8 ships 257. On an older system the client
+reports that the token could not be saved rather than persisting it weakly.
+
+If `--sign-in` instead says the token **could not be saved**, check:
+
+```bash
+systemd-creds --user --name=t encrypt - - <<< probe >/dev/null && echo "sealing works"
 ```
 
 ## 3. Find the Fallout 4 install directory
@@ -179,6 +168,29 @@ so this is usually unnecessary:
 sudo loginctl enable-linger $USER
 ```
 
+### If the game is on an SD card
+
+A Steam library on an SD card mounts at some point during login, and the service
+may start first. `watch_path` then does not exist yet, `filterGames` drops the
+game with a warning, and the daemon watches nothing until something restarts it
+— `"games":0` after every reboot, with no obvious cause.
+
+Tell systemd to wait for the mount:
+
+```bash
+mkdir -p ~/.config/systemd/user/ludotrace.service.d
+cat > ~/.config/systemd/user/ludotrace.service.d/sdcard.conf <<'EOF'
+[Unit]
+RequiresMountsFor=/run/media/deck/YOUR_CARD
+EOF
+systemctl --user daemon-reload
+systemctl --user restart ludotrace.service
+```
+
+Use the path `libraryfolders.vdf` declares (step 3). A card often also appears at
+`/run/media/<label>` without the user component; that is a compatibility
+symlink, and the canonical path is the one to depend on.
+
 ## 6. Verify
 
 ```bash
@@ -223,16 +235,15 @@ They look different in the log, and the difference tells you which one you have.
 **No token stored — `client state — sign in from a desktop session to resume
 uploads`, once, at startup.** Nobody has signed in on this machine. The upload
 worker stops and waits for a sign-in, which headless cannot offer, so it goes
-quiet rather than retrying. Sign in from Desktop Mode (step 1).
+quiet rather than retrying. Sign in from Desktop Mode (step 2).
 
 **Token unreadable — `failed to get auth token`, repeating every 5 seconds.**
-Sign-in *did* work in Desktop Mode, but the keyring holding the token is not
-reachable from the session the unit runs in. The client cannot tell this apart
-from a transient fault, so it retries indefinitely instead of waiting:
+The token could not be read back. The client cannot tell this apart from a
+transient fault, so it retries indefinitely rather than waiting:
 
 ```json
 {"level":"WARN","msg":"failed to get auth token",
- "err":"auth: load opaque token: keychain: load: ..."}
+ "err":"auth: load opaque token: keychain: ..."}
 ```
 
 A `keychain:` error inside `err` is the giveaway — a plain "not signed in" is the
@@ -240,24 +251,16 @@ case above. Expect roughly 17k of these a day while anything is queued;
 `ludotrace.log` rotates at 5 MiB so it will not fill the disk, but it will bury
 everything else.
 
-Nearly always this means **the wallet is locked**, not that the token is bad or
-missing — see step 1. The Deck auto-logs-in, so nothing unlocks a
-password-protected wallet, and Gaming Mode has nobody to answer the prompt.
-
-A provider being present is not the same as the wallet being open, so check
-readability rather than presence:
+On a Deck the token is sealed with `systemd-creds --user` (step 2), so check
+that sealing still works for your user:
 
 ```bash
-busctl --user list | grep -i secrets   # is ksecretd reachable at all?
-secret-tool lookup service ludotrace username opaque_token   # is it actually readable?
+systemd-creds --user --name=t encrypt - - <<< probe >/dev/null && echo "sealing works"
 ```
 
-A locked wallet answers the first and fails the second. That is the case to fix:
-give the wallet a blank password in Desktop Mode, or disable auto-login (step 1).
-
-If the first command lists nothing either, no Secret Service is running in that
-session — confirm "Use KWallet for the Secret Service interface" is enabled in
-System Settings → KDE Wallet.
+If that fails, so will the client. If it succeeds but the client still cannot
+read the token, re-run `--sign-in` — the stored blob may predate a change that
+invalidated it, and re-sealing is cheap.
 
 **`client state — no games configured`.** `config.toml` is missing or has no
 `[[games]]` block that survived validation. Add Game is a tray action and is
@@ -298,7 +301,7 @@ Environment=LUDOTRACE_LOG_LEVEL=debug
 systemctl --user disable --now ludotrace.service
 rm ~/.config/systemd/user/ludotrace.service
 systemctl --user daemon-reload
-rm ~/.local/bin/ludotrace-linux
+rm ~/.local/bin/ludotrace-linux-headless
 ```
 
 State in `~/.config/ludotrace` (config, queue, offsets) is left in place; delete

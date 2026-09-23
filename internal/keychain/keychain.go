@@ -24,6 +24,13 @@ const (
 // ErrNotFound is returned by Load when no token has been stored yet.
 var ErrNotFound = errors.New("keychain: token not found")
 
+// errNoSecureFallback signals that no secure on-disk fallback is available
+// here: the platform has none, or the one it would use is missing (on Linux,
+// systemd-creds). We deliberately refuse to write the token as plaintext, so
+// the token then lives in memory only for the session and the caller surfaces
+// a sign-in-won't-persist warning.
+var errNoSecureFallback = errors.New("keychain: no secure on-disk fallback available")
+
 // ErrUsedFallback is returned (wrapped) by Save when the OS keychain rejected
 // the write but the token was persisted to the secure on-disk fallback instead.
 // The token IS durable; callers should treat this as a degraded success and
@@ -126,3 +133,17 @@ func (s *osStore) Delete() error {
 	}
 	return nil
 }
+
+// unsupportedFallback is the fallback used where no secure store exists. It
+// refuses every write rather than persisting the token in the clear, so the
+// chain degrades to "in memory for this session only" and the caller reports
+// that sign-in will not survive a restart.
+//
+// Shared rather than platform-scoped: Linux reaches this same state whenever
+// systemd-creds is missing or too old, so the behaviour it pins down is not
+// specific to the platforms that have no store at all.
+type unsupportedFallback struct{}
+
+func (unsupportedFallback) Save(string) error     { return errNoSecureFallback }
+func (unsupportedFallback) Load() (string, error) { return "", ErrNotFound }
+func (unsupportedFallback) Delete() error         { return nil }

@@ -42,7 +42,7 @@ func TestShowSuppressedIsNonBlocking(t *testing.T) {
 
 func TestSuppressMarkers(t *testing.T) {
 	// These specific markers must always be recognized as non-interactive.
-	for _, m := range []string{"--autostart", "--finish-update", "--check-update"} {
+	for _, m := range []string{"--autostart", "--finish-update", "--check-update", "--headless", "--sign-in", "--sign-out"} {
 		if !isSuppressMarker(m) {
 			t.Errorf("expected %q to be a recognized suppress marker", m)
 		}

@@ -38,7 +38,7 @@ jobs:
       # Windows is pure-Go (CGO off); Linux is CGO+GTK. Both build on ubuntu.
       - name: Build Windows + Linux
         if: matrix.os == 'ubuntu-latest'
-        run: make build-windows build-linux
+        run: make build-windows build-linux build-linux-headless
 
       # darwin/systray needs CGO + Cocoa — only available on a macOS runner.
       # Cannot be cross-compiled from ubuntu (Go disables CGO when cross-
@@ -110,6 +110,7 @@ jobs:
           SHA_MAC_ARM=$(awk '{print $1}' dist/ludotrace-mac-arm64.sha256)
           SHA_WIN=$(awk '{print $1}' dist/ludotrace.exe.sha256)
           SHA_LINUX=$(awk '{print $1}' dist/ludotrace-linux.sha256)
+          SHA_LINUX_HL=$(awk '{print $1}' dist/ludotrace-linux-headless.sha256)
 
           mkdir -p site/client
           cat > site/client/version.json <<EOF
@@ -120,7 +121,8 @@ jobs:
               "darwin/amd64":  { "url": "${ASSET_BASE}/ludotrace-mac-x64",   "sha256": "${SHA_MAC_X64}" },
               "darwin/arm64":  { "url": "${ASSET_BASE}/ludotrace-mac-arm64",  "sha256": "${SHA_MAC_ARM}" },
               "windows/amd64": { "url": "${ASSET_BASE}/ludotrace.exe",         "sha256": "${SHA_WIN}" },
-              "linux/amd64":   { "url": "${ASSET_BASE}/ludotrace-linux",       "sha256": "${SHA_LINUX}" }
+              "linux/amd64":   { "url": "${ASSET_BASE}/ludotrace-linux",       "sha256": "${SHA_LINUX}" },
+              "linux/amd64-headless": { "url": "${ASSET_BASE}/ludotrace-linux-headless", "sha256": "${SHA_LINUX_HL}" }
             }
           }
           EOF

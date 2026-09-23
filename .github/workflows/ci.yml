@@ -85,3 +85,37 @@ jobs:
           name: ludotrace-linux
           path: dist/ludotrace-linux
           if-no-files-found: error
+
+  # The binary that actually runs on a Steam Deck. Built and uploaded separately
+  # from build-linux because it is a different artifact, not a variant flag:
+  # -tags headless drops systray and sqweek/dialog, which lets CGO_ENABLED=0
+  # produce a static binary. SteamOS has no libayatana-appindicator3, so the
+  # dynamically-linked build above cannot start there at all.
+  build-linux-headless:
+    name: Build (Linux, headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # No apt install: the whole point is that this build needs no GTK.
+      - run: make build-linux-headless
+
+      # Guards the property the Steam Deck depends on. A stray cgo import would
+      # otherwise reintroduce a dynamic link and only fail on the device.
+      - name: Assert the binary is static
+        run: |
+          if ! file dist/ludotrace-linux-headless | grep -q "statically linked"; then
+            echo "::error::headless build is not static — it will not run on SteamOS"
+            file dist/ludotrace-linux-headless
+            ldd dist/ludotrace-linux-headless || true
+            exit 1
+          fi
+          echo "OK: statically linked, no shared library dependencies"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ludotrace-linux-headless
+          path: dist/ludotrace-linux-headless
+          if-no-files-found: error

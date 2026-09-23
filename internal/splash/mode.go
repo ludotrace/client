@@ -35,6 +35,8 @@ var suppressArgs = map[string]bool{
 	"--finish-update": true,
 	"--check-update":  true,
 	"--headless":      true,
+	"--sign-in":       true,
+	"--sign-out":      true,
 }
 
 // DecideLaunch classifies a launch from its raw argv (pass os.Args directly).
