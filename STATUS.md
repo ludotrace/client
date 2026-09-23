@@ -46,6 +46,7 @@ Confirmed by manual end-to-end test or observed running.
 - Linux token storage via `systemd-creds --user` (`internal/keychain/fallback_linux.go`) — seals against an OS-held TPM2-backed key where no Secret Service exists, as on SteamOS. Confirmed on a Deck: sealed by `--sign-in`, read back by the service. Needs systemd 256+
 - systemd user unit (`packaging/systemd/`) — starts the daemon on a Steam Deck with `games` loaded and the token readable; runbook in `docs/steam-deck.md`
 - Steam Deck end to end — real Fallout 4 play captured from an SD-card library, three sessions extracted by the startup scan, uploaded, queue drained and offset advanced to EOF
+- Steam Deck survives a Desktop/Gaming mode switch — same PID across a real gaming session, so `WantedBy=default.target` holds the daemon through the mode change
 
 **Tray**
 - Six states, driven from queue + auth state
@@ -58,7 +59,6 @@ Confirmed by manual end-to-end test or observed running.
 ## Implemented, not yet validated
 
 - Headless builds take the `linux/amd64-headless` update-manifest key, so they cannot self-update into the GTK-linked binary
-- Steam Deck persistence across a Desktop/Gaming mode switch — the unit is `WantedBy=default.target` for it, not yet exercised on hardware
 - Linux binary published as a CI artifact (`ludotrace-linux`) on every push, alongside the existing release-tag asset
 - Bounded upload queue — age-based drop-oldest, newest-first upload (#60)
 - Permanent-failure retirement — a 400 or too-large item advances the offset past the rejected region, removes its temp file, and leaves the queue by path (#76)
