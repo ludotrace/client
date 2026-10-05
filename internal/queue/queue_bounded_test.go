@@ -12,7 +12,7 @@ const day = 24 * time.Hour
 // enqueueAged is a helper that enqueues an item captured ageDays before now.
 func enqueueAged(t *testing.T, q *Queue, tmpPath string, ageDays int, now time.Time) {
 	t.Helper()
-	if err := q.Enqueue(Item{
+	if _, err := q.Enqueue(Item{
 		TmpPath:    tmpPath,
 		CapturedAt: now.Add(-time.Duration(ageDays) * day),
 	}); err != nil {
@@ -67,11 +67,11 @@ func TestEvictExpired_ThresholdBoundary(t *testing.T) {
 
 	q, _ := New(queuePath(t))
 	// Exactly at the threshold: age == maxAge → kept (eviction is strictly >).
-	if err := q.Enqueue(Item{TmpPath: "/tmp/exact", CapturedAt: now.Add(-maxAge)}); err != nil {
+	if _, err := q.Enqueue(Item{TmpPath: "/tmp/exact", CapturedAt: now.Add(-maxAge)}); err != nil {
 		t.Fatal(err)
 	}
 	// One nanosecond past the threshold → evicted.
-	if err := q.Enqueue(Item{TmpPath: "/tmp/past", CapturedAt: now.Add(-maxAge - time.Nanosecond)}); err != nil {
+	if _, err := q.Enqueue(Item{TmpPath: "/tmp/past", CapturedAt: now.Add(-maxAge - time.Nanosecond)}); err != nil {
 		t.Fatal(err)
 	}
 

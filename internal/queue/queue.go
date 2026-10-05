@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"slices"
 	"sort"
@@ -12,10 +13,13 @@ import (
 )
 
 type Item struct {
-	GameID    string `json:"game_id"`
-	TmpPath   string `json:"tmp_path"`
-	EndOffset int64  `json:"end_offset"`
-	Attempts  int    `json:"attempts"`
+	GameID  string `json:"game_id"`
+	TmpPath string `json:"tmp_path"`
+	// StartOffset is the events-file offset of the item's first byte. Nil for
+	// an item enqueued before this field existed (client#95).
+	StartOffset *int64 `json:"start_offset,omitempty"`
+	EndOffset   int64  `json:"end_offset"`
+	Attempts    int    `json:"attempts"`
 	// CapturedAt is when the session was extracted and enqueued. It is the
 	// basis for both age-based eviction (drop-oldest past the max age) and
 	// newest-first upload selection — see EvictExpired and PeekNewest. Persisted
@@ -99,15 +103,83 @@ func (q *Queue) flush() error {
 	return os.Rename(tmp, q.path)
 }
 
-func (q *Queue) Enqueue(item Item) error {
+// ErrDuplicate is returned by Enqueue when a queued item already covers the
+// new one's bytes. The item is not added; its temp file is the caller's to
+// remove.
+var ErrDuplicate = errors.New("queue: region already queued")
+
+// covers reports whether a's bytes include all of b's: same game and the same
+// region, or a longer cut from the same start. Items without a StartOffset
+// (legacy queue.json) match only on an identical EndOffset.
+func covers(a, b Item) bool {
+	if a.GameID != b.GameID || a.TmpPath == b.TmpPath {
+		return false
+	}
+	if a.StartOffset == nil || b.StartOffset == nil {
+		return a.EndOffset == b.EndOffset
+	}
+	return *a.StartOffset == *b.StartOffset && b.EndOffset <= a.EndOffset
+}
+
+// Enqueue adds item unless a queued item already covers it (ErrDuplicate).
+// Queued items that item covers — shorter cuts of the same region — are
+// removed and returned so the caller can delete their temp files.
+//
+// The read offset only advances on a successful upload, so while uploads are
+// blocked every extraction pass re-cuts the same regions; without this the
+// queue grows by one copy per events-file write (client#95).
+func (q *Queue) Enqueue(item Item) ([]Item, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	// Only an item that knows its start takes part: without one, every
+	// zero-offset item would match every other.
+	var superseded []Item
+	if item.StartOffset != nil {
+		for _, it := range q.items {
+			if covers(it, item) {
+				return nil, ErrDuplicate
+			}
+		}
+		superseded = q.removeCoveredLocked(item)
+	}
 	q.items = append(q.items, item)
 	// Signal before flushing, and regardless of its outcome: the item is in
 	// q.items either way, so it is uploadable and a consumer blocked on
 	// Enqueued must not be left asleep by a failed write to disk.
 	q.signalEnqueued()
-	return q.flush()
+	return superseded, q.flush()
+}
+
+// RemoveCovered removes every queued item whose bytes item covers (see
+// covers), excluding item itself, and returns them so the caller can delete
+// their temp files. The upload worker calls it after retiring item, to clear
+// copies a pre-#95 client queued.
+func (q *Queue) RemoveCovered(item Item) ([]Item, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	removed := q.removeCoveredLocked(item)
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	return removed, q.flush()
+}
+
+// removeCoveredLocked drops the items item covers. Must be called with q.mu
+// held; the caller flushes.
+func (q *Queue) removeCoveredLocked(item Item) []Item {
+	var removed []Item
+	kept := q.items[:0:0]
+	for _, it := range q.items {
+		if covers(item, it) {
+			removed = append(removed, it)
+		} else {
+			kept = append(kept, it)
+		}
+	}
+	if len(removed) > 0 {
+		q.items = kept
+	}
+	return removed
 }
 
 // Enqueued returns a channel that receives when an item is enqueued. A

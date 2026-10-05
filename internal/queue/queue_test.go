@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -30,7 +31,7 @@ func TestEnqueueArrivalOrder(t *testing.T) {
 		{GameID: "g3", TmpPath: "/tmp/c"},
 	}
 	for _, item := range items {
-		if err := q.Enqueue(item); err != nil {
+		if _, err := q.Enqueue(item); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
@@ -47,7 +48,7 @@ func TestEnqueueArrivalOrder(t *testing.T) {
 
 func TestItemsReturnsCopy(t *testing.T) {
 	q, _ := New(queuePath(t))
-	_ = q.Enqueue(Item{TmpPath: "/tmp/x"})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/x"})
 
 	got := q.Items()
 	if len(got) != 1 || got[0].TmpPath != "/tmp/x" {
@@ -71,7 +72,7 @@ func TestItemsEmptyQueue(t *testing.T) {
 
 func TestContains(t *testing.T) {
 	q, _ := New(queuePath(t))
-	_ = q.Enqueue(Item{TmpPath: "/tmp/present"})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/present"})
 
 	if !q.Contains("/tmp/present") {
 		t.Error("Contains returned false for queued path")
@@ -84,7 +85,7 @@ func TestContains(t *testing.T) {
 func TestUpdateAttempts(t *testing.T) {
 	path := queuePath(t)
 	q, _ := New(path)
-	_ = q.Enqueue(Item{TmpPath: "/tmp/a", Attempts: 0})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/a", Attempts: 0})
 
 	if err := q.UpdateAttempts("/tmp/a"); err != nil {
 		t.Fatalf("UpdateAttempts: %v", err)
@@ -114,9 +115,9 @@ func TestUpdateAttemptsNoop(t *testing.T) {
 func TestRemoveByTmpPath(t *testing.T) {
 	path := queuePath(t)
 	q, _ := New(path)
-	_ = q.Enqueue(Item{TmpPath: "/tmp/a"})
-	_ = q.Enqueue(Item{TmpPath: "/tmp/b"})
-	_ = q.Enqueue(Item{TmpPath: "/tmp/c"})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/a"})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/b"})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/c"})
 
 	if err := q.Remove("/tmp/b"); err != nil {
 		t.Fatalf("Remove: %v", err)
@@ -136,7 +137,7 @@ func TestRemoveByTmpPath(t *testing.T) {
 
 func TestRemoveNoop(t *testing.T) {
 	q, _ := New(queuePath(t))
-	_ = q.Enqueue(Item{TmpPath: "/tmp/a"})
+	_, _ = q.Enqueue(Item{TmpPath: "/tmp/a"})
 	if err := q.Remove("/tmp/nonexistent"); err != nil {
 		t.Fatalf("Remove of nonexistent path should not error: %v", err)
 	}
@@ -149,8 +150,8 @@ func TestPersistence(t *testing.T) {
 	path := queuePath(t)
 
 	q1, _ := New(path)
-	_ = q1.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/sess1", EndOffset: 42, Attempts: 1})
-	_ = q1.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/sess2", EndOffset: 99})
+	_, _ = q1.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/sess1", EndOffset: 42, Attempts: 1})
+	_, _ = q1.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/sess2", EndOffset: 99})
 
 	q2, err := New(path)
 	if err != nil {
@@ -173,11 +174,73 @@ func TestConcurrentEnqueue(t *testing.T) {
 	for i := range n {
 		go func(i int) {
 			defer wg.Done()
-			_ = q.Enqueue(Item{TmpPath: fmt.Sprintf("/tmp/%d", i)})
+			_, _ = q.Enqueue(Item{TmpPath: fmt.Sprintf("/tmp/%d", i)})
 		}(i)
 	}
 	wg.Wait()
 	if q.Len() != n {
 		t.Errorf("expected %d items, got %d", n, q.Len())
+	}
+}
+
+func off(n int64) *int64 { return &n }
+
+func TestEnqueue_SameRegionIsDuplicate(t *testing.T) {
+	q, _ := New(filepath.Join(t.TempDir(), "queue.json"))
+	if _, err := q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/a", StartOffset: off(10), EndOffset: 50}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/b", StartOffset: off(10), EndOffset: 50}); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("second Enqueue err = %v, want ErrDuplicate", err)
+	}
+	// A shorter cut from the same start is covered too.
+	if _, err := q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/c", StartOffset: off(10), EndOffset: 40}); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("shorter Enqueue err = %v, want ErrDuplicate", err)
+	}
+	// Another game, or another start, is a different region.
+	if _, err := q.Enqueue(Item{GameID: "stardew", TmpPath: "/tmp/d", StartOffset: off(10), EndOffset: 50}); err != nil {
+		t.Fatalf("other game: %v", err)
+	}
+	if _, err := q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/e", StartOffset: off(50), EndOffset: 90}); err != nil {
+		t.Fatalf("next region: %v", err)
+	}
+	if q.Len() != 3 {
+		t.Fatalf("queue length = %d, want 3", q.Len())
+	}
+}
+
+func TestEnqueue_LongerCutSupersedesPrefix(t *testing.T) {
+	q, _ := New(filepath.Join(t.TempDir(), "queue.json"))
+	_, _ = q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/short", StartOffset: off(10), EndOffset: 40})
+	superseded, err := q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/long", StartOffset: off(10), EndOffset: 50})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if len(superseded) != 1 || superseded[0].TmpPath != "/tmp/short" {
+		t.Fatalf("superseded = %+v, want /tmp/short", superseded)
+	}
+	if q.Len() != 1 || !q.Contains("/tmp/long") {
+		t.Fatalf("queue = %+v, want only /tmp/long", q.Items())
+	}
+}
+
+// Items without a StartOffset come from a pre-#95 queue.json; they are
+// matched on EndOffset alone so retiring one clears its copies.
+func TestRemoveCovered_LegacyCopies(t *testing.T) {
+	q, _ := New(filepath.Join(t.TempDir(), "queue.json"))
+	for _, p := range []string{"/tmp/1", "/tmp/2", "/tmp/3"} {
+		_, _ = q.Enqueue(Item{GameID: "fo4", TmpPath: p, EndOffset: 50})
+	}
+	_, _ = q.Enqueue(Item{GameID: "fo4", TmpPath: "/tmp/other", EndOffset: 90})
+
+	removed, err := q.RemoveCovered(Item{GameID: "fo4", TmpPath: "/tmp/1", EndOffset: 50})
+	if err != nil {
+		t.Fatalf("RemoveCovered: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Fatalf("removed %d, want 2", len(removed))
+	}
+	if q.Len() != 2 || !q.Contains("/tmp/1") || !q.Contains("/tmp/other") {
+		t.Fatalf("queue = %+v", q.Items())
 	}
 }
