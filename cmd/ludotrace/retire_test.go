@@ -40,7 +40,7 @@ func TestRetireItem_RetiresTheNamedItemOnly(t *testing.T) {
 		if werr := os.WriteFile(it.TmpPath, []byte("{}\n"), 0600); werr != nil {
 			t.Fatalf("write temp file: %v", werr)
 		}
-		if eerr := q.Enqueue(it); eerr != nil {
+		if _, eerr := q.Enqueue(it); eerr != nil {
 			t.Fatalf("Enqueue: %v", eerr)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -121,6 +122,11 @@ type eventEnvelope struct {
 type openSession struct {
 	lines [][]byte
 	bytes int
+
+	// start is the events-file offset of the region's first byte. Two regions
+	// with the same start are cuts of the same bytes; the queue uses it to keep
+	// only the longest (client#95).
+	start int64
 
 	// opener is set when the region is created, from whether it began at a
 	// session_start or at carried-forward bytes.
@@ -301,14 +307,14 @@ func (e *Extractor) extract(shutdown bool) error {
 				current.leadInto(clock)
 				leadIn = nil
 			} else {
-				current = &openSession{opener: capture.OpenerPresent}
+				current = &openSession{opener: capture.OpenerPresent, start: curOffset}
 			}
 			current.append(rawJSON, clock)
 		} else if current != nil {
 			current.append(rawJSON, clock)
 		} else {
 			if leadIn == nil {
-				leadIn = &openSession{opener: capture.OpenerAbsent}
+				leadIn = &openSession{opener: capture.OpenerAbsent, start: curOffset}
 			}
 			leadIn.append(rawJSON, clock)
 		}
@@ -392,13 +398,26 @@ func (e *Extractor) writeAndEnqueue(sess *openSession, endOffset int64, closedBy
 		return fmt.Errorf("session: close temp: %w", err)
 	}
 
-	return e.q.Enqueue(queue.Item{
-		GameID:     e.gameID,
-		TmpPath:    tmpPath,
-		EndOffset:  endOffset,
-		CapturedAt: time.Now(),
-		Capture:    sess.captureContext(closedBy),
+	start := sess.start
+	superseded, err := e.q.Enqueue(queue.Item{
+		GameID:      e.gameID,
+		TmpPath:     tmpPath,
+		StartOffset: &start,
+		EndOffset:   endOffset,
+		CapturedAt:  time.Now(),
+		Capture:     sess.captureContext(closedBy),
 	})
+	// The offset only advances on upload, so while uploads are blocked every
+	// pass re-cuts the same regions. A cut the queue already holds is not
+	// added; its temp file is redundant.
+	if errors.Is(err, queue.ErrDuplicate) {
+		os.Remove(tmpPath)
+		return nil
+	}
+	for _, it := range superseded {
+		os.Remove(it.TmpPath)
+	}
+	return err
 }
 
 // scanRawLines is a bufio.SplitFunc that splits on \n but keeps \r in the

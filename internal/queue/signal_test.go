@@ -36,7 +36,7 @@ func TestEnqueue_Signals(t *testing.T) {
 	if pending(q) {
 		t.Fatal("fresh queue already has a wake pending")
 	}
-	if err := q.Enqueue(item("a.jsonl")); err != nil {
+	if _, err := q.Enqueue(item("a.jsonl")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 	if !pending(q) {
@@ -49,7 +49,7 @@ func TestEnqueue_Signals(t *testing.T) {
 // sleeps forever on a non-empty queue.
 func TestEnqueue_SignalOutlivesAnAbsentConsumer(t *testing.T) {
 	q := newTestQueue(t)
-	if err := q.Enqueue(item("a.jsonl")); err != nil {
+	if _, err := q.Enqueue(item("a.jsonl")); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
 
@@ -66,7 +66,7 @@ func TestEnqueue_SignalOutlivesAnAbsentConsumer(t *testing.T) {
 func TestEnqueue_SignalsCoalesce(t *testing.T) {
 	q := newTestQueue(t)
 	for _, n := range []string{"a.jsonl", "b.jsonl", "c.jsonl"} {
-		if err := q.Enqueue(item(n)); err != nil {
+		if _, err := q.Enqueue(item(n)); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 	}

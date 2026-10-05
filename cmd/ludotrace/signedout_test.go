@@ -40,7 +40,7 @@ func TestRunUploadWorker_SignedOutBlocksAndStaysInterruptible(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queue.New: %v", err)
 	}
-	if eerr := q.Enqueue(queue.Item{
+	if _, eerr := q.Enqueue(queue.Item{
 		GameID: "fallout4", TmpPath: filepath.Join(dir, "lt_session.jsonl"),
 		EndOffset: 100, CapturedAt: time.Now(),
 	}); eerr != nil {

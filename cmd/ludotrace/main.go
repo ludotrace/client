@@ -736,6 +736,9 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 	// is not, so the log happens on the transition only and is armed again by
 	// the next successful GetToken.
 	notSignedIn := false
+	// Same transition-only logging for a 429 stretch, re-armed by the next
+	// successful upload.
+	limitReached := false
 
 	// A single reusable timer for all backoff/retry delays in this loop,
 	// rather than a fresh time.After per branch — under rapid repeated
@@ -865,6 +868,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		jobID, traceID, err := uploader.Upload(ctx, cfg.CoreURL, item.GameID, item.TmpPath, token, item.Capture)
 		if err == nil {
 			retireItem(q, extractors, item)
+			limitReached = false
 			slog.Info("upload succeeded", "game_id", item.GameID, "job_id", jobID)
 			backoff.reset()
 			t.ResetDropped()
@@ -884,7 +888,13 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 		if errors.Is(err, uploader.ErrLimitReached) {
 			t.SetState(tray.StateLimitReached)
 			_ = q.UpdateAttempts(item.TmpPath)
-			if !wait(limitReachedWait(err)) {
+			delay := limitReachedWait(err)
+			if !limitReached {
+				limitReached = true
+				slog.Warn("upload limit reached — uploads paused",
+					"game_id", item.GameID, "queued", q.Len(), "retry_in", delay, "trace_id", traceID)
+			}
+			if !wait(delay) {
 				return
 			}
 			continue
@@ -947,6 +957,20 @@ func retireItem(q *queue.Queue, extractors *extractorStore, item queue.Item) {
 	}
 	if rerr := q.Remove(item.TmpPath); rerr != nil {
 		slog.Warn("failed to remove queue item", "err", rerr)
+	}
+	// Copies of the same region queued by a pre-#95 client are settled by
+	// this one; uploading them would spend quota on a duplicate job.
+	covered, cerr := q.RemoveCovered(item)
+	if cerr != nil {
+		slog.Warn("failed to remove covered queue items", "err", cerr)
+	}
+	for _, it := range covered {
+		if rerr := os.Remove(it.TmpPath); rerr != nil && !os.IsNotExist(rerr) {
+			slog.Warn("failed to remove temp file", "path", it.TmpPath, "err", rerr)
+		}
+	}
+	if len(covered) > 0 {
+		slog.Info("dropped duplicate queue items", "game_id", item.GameID, "count", len(covered))
 	}
 }
 
