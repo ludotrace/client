@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"time"
 )
 
@@ -37,6 +38,48 @@ func (b *uploadBackoff) next() time.Duration {
 func (b *uploadBackoff) reset() {
 	b.idx = 0
 }
+
+// Update-check retry bounds. A failed check retries after checkRetryBase,
+// doubling up to checkRetryCap. The cap keeps a client that is offline for days
+// (a Steam Deck off Wi-Fi is the normal case, not an outage) to about one
+// attempt an hour, while a check that failed at wake from sleep — before the
+// network is back — is retried within minutes instead of a full interval
+// later (client#97).
+const (
+	checkRetryBase = 1 * time.Minute
+	checkRetryCap  = 1 * time.Hour
+	// checkRetryJitter spreads retries by ±20% so clients that failed together
+	// (a shared outage, a fleet waking at the same hour) don't retry in step.
+	checkRetryJitter = 0.2
+)
+
+// checkBackoff is the retry delay for failed update checks: exponential from
+// checkRetryBase to checkRetryCap, with jitter. The zero value is ready to use.
+type checkBackoff struct {
+	failures int
+	// rand returns a value in [0, 1); nil uses math/rand/v2. Tests pin it.
+	rand func() float64
+}
+
+// next records a failure and returns the delay before the next attempt.
+func (b *checkBackoff) next() time.Duration {
+	d := checkRetryBase
+	for i := 0; i < b.failures && d < checkRetryCap; i++ {
+		d *= 2
+	}
+	d = min(d, checkRetryCap)
+	b.failures++
+
+	r := rand.Float64
+	if b.rand != nil {
+		r = b.rand
+	}
+	// Scale by a factor in [1-jitter, 1+jitter).
+	return time.Duration(float64(d) * (1 - checkRetryJitter + 2*checkRetryJitter*r()))
+}
+
+// reset clears the failure count after a successful check.
+func (b *checkBackoff) reset() { b.failures = 0 }
 
 // queuedMessage renders the tray status line for the queued/offline state,
 // e.g. "2 sessions queued — retrying in 5m".
