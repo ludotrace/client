@@ -337,51 +337,66 @@ func openLogFile(cfgDir string) *os.File {
 }
 
 // runUpdateWorker checks for a newer version on startup then on a
-// server-controlled interval (default 24 h).
+// server-controlled interval (default 24 h). A failed check is retried on
+// checkBackoff instead of waiting out the full interval (client#97), and is
+// logged once per failing stretch, not per attempt: no network is a normal
+// state on a Steam Deck, and the log should not fill with it.
 func runUpdateWorker(ctx context.Context, cfgDir string, t *tray.Tray) {
 	u := updater.New(cfgDir)
-	interval := 4 * time.Hour
+	var backoff checkBackoff
+	failing := 0
 
-	doCheck := func() {
-		upd, pendingPath, next := checkAndStage(ctx, u)
-		if next > 0 {
-			interval = next
-		}
+	for {
+		upd, pendingPath, next, err := checkAndStage(ctx, u)
 		if upd != nil && pendingPath != "" {
 			t.NotifyUpdateReady(upd.Version, pendingPath, makeRestartFn())
 		}
-	}
 
-	doCheck()
+		delay := next
+		if err != nil {
+			delay = backoff.next()
+			failing++
+			if failing == 1 {
+				slog.Warn("update check failed — retrying with backoff",
+					"err", err, "retry_in", delay.String())
+			} else {
+				slog.Debug("update check failed again",
+					"err", err, "attempt", failing, "retry_in", delay.String())
+			}
+		} else {
+			if failing > 0 {
+				slog.Info("update check recovered", "failed_attempts", failing)
+			}
+			failing = 0
+			backoff.reset()
+		}
 
-	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(interval):
-			doCheck()
+		case <-time.After(delay):
 		}
 	}
 }
 
 // checkAndStage runs one version check and, if a newer version is available,
 // stages it. Returns the update, the staged binary path (empty if nothing was
-// staged), and the interval until the next check. Shared by the background
-// worker and the --check-update one-shot.
-func checkAndStage(ctx context.Context, u *updater.Updater) (*updater.Update, string, time.Duration) {
+// staged), the server's interval until the next check, and the error from
+// the check or the staging download. Callers log the error. Shared by the
+// background worker and the --check-update one-shot.
+func checkAndStage(ctx context.Context, u *updater.Updater) (*updater.Update, string, time.Duration, error) {
 	upd, next, err := u.Check(ctx)
 	if err != nil {
-		slog.Warn("version check failed", "err", err)
+		return nil, "", next, fmt.Errorf("version check: %w", err)
 	}
 	if upd == nil {
-		return nil, "", next
+		return nil, "", next, nil
 	}
 	pendingPath, err := u.Stage(ctx, upd)
 	if err != nil {
-		slog.Warn("failed to stage update", "version", upd.Version, "err", err)
-		return upd, "", next
+		return upd, "", next, fmt.Errorf("stage update %s: %w", upd.Version, err)
 	}
-	return upd, pendingPath, next
+	return upd, pendingPath, next, nil
 }
 
 // newAuthClient wires the keychain-backed auth client the one-shots share with
@@ -474,7 +489,10 @@ func runCheckUpdate() int {
 
 	slog.Info("running one-shot update check", "version", version.Version)
 	u := updater.New(cfgDir)
-	upd, pendingPath, _ := checkAndStage(context.Background(), u)
+	upd, pendingPath, _, err := checkAndStage(context.Background(), u)
+	if err != nil {
+		slog.Error("update check failed", "err", err)
+	}
 
 	switch {
 	case upd == nil:
@@ -892,7 +910,7 @@ func runUploadWorker(ctx context.Context, cfg *config.Config, authClient auth.Cl
 			if !limitReached {
 				limitReached = true
 				slog.Warn("upload limit reached — uploads paused",
-					"game_id", item.GameID, "queued", q.Len(), "retry_in", delay, "trace_id", traceID)
+					"game_id", item.GameID, "queued", q.Len(), "retry_in", delay.String(), "trace_id", traceID)
 			}
 			if !wait(delay) {
 				return
